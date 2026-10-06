@@ -1,0 +1,54 @@
+import axios from 'axios'
+
+const api = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api',
+  headers: { 'Content-Type': 'application/json' },
+})
+
+// Attach correct JWT token based on the route and request domain
+api.interceptors.request.use((config) => {
+  const adminToken = localStorage.getItem('admin_token')
+  const workerToken = localStorage.getItem('worker_token')
+  const deviceToken = localStorage.getItem('device_token')
+
+  let token = null
+  const pathname = window.location.pathname
+  const url = config.url || ''
+
+  if (url.includes('/kiosk') || pathname.startsWith('/device') || pathname.startsWith('/endpoint-device')) {
+    token = deviceToken || adminToken
+  } else if (pathname.startsWith('/health-worker') || url.includes('/health-worker') || url.includes('/patients')) {
+    token = workerToken || adminToken
+  } else if (pathname.startsWith('/admin') || url.includes('/care-hub') || url.includes('/doctors') || url.includes('/health-workers') || url.includes('/endpoint-devices') || url.includes('/communicate') || url.includes('/settings')) {
+    token = adminToken
+  } else {
+    token = adminToken || workerToken || deviceToken
+  }
+
+  if (token && !config.headers.Authorization) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+// Handle token expiry without hijacking login forms
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    const isLoginRequest = err.config?.url?.includes('/auth/')
+    if (err.response?.status === 401 && !isLoginRequest) {
+      if (window.location.pathname.startsWith('/health-worker')) {
+        localStorage.removeItem('worker_token')
+        localStorage.removeItem('worker_info')
+        window.location.href = '/login/health-worker'
+      } else if (window.location.pathname.startsWith('/admin')) {
+        localStorage.removeItem('admin_token')
+        localStorage.removeItem('admin_info')
+        window.location.href = '/login/admin'
+      }
+    }
+    return Promise.reject(err)
+  }
+)
+
+export default api

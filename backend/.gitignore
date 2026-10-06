@@ -1,0 +1,30 @@
+# Backend .gitignore
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.pytest_cache/
+
+# Uploads & Media
+uploads/prescriptions/*
+!uploads/prescriptions/.gitkeep
+app/Local TTS/*.wav
+*.wav
+*.mp3
+*.webm
+
+# Caches
+.cache/
+.paddlex/
+
+node_modules/
+.env
+.env.*
+!.env.example

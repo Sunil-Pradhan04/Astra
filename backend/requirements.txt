@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+beanie==1.26.0
+motor==3.3.2
+python-jose[cryptography]
+passlib[bcrypt]
+pydantic-settings
+python-multipart
+aiosmtplib
+email-validator
+pymongo
+httpx
+redis
+openai>=1.0.0
+pinecone>=6.0.0
