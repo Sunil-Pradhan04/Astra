@@ -36,6 +36,7 @@ from app.services.local_tts_service import local_tts
 from app.services.memory_store import session_memory
 from app.services.rag_triage_service import rag_triage
 from app.services.ocr_service import ocr_service
+from app.services.conversation_rag_service import conversation_rag
 from app.core.prompts import ANSWER_ADEQUACY_SYSTEM, build_answer_adequacy_prompt
 from app.urgency import urgency_detector
 
@@ -147,29 +148,57 @@ def _get_localized_cam_guidance(lang_code: str) -> str:
 
 
 def _patient_mentions_prescription_or_report(answer_clean: str, answer_en: str) -> bool:
-    """Detects if patient stated they have a medical report, prescription, lab test, or paper."""
+    """Detects if patient stated they POSITIVELY have a medical report, prescription, lab test, or paper to show."""
     clean = (answer_clean or "").strip().lower()
     en = (answer_en or "").strip().lower()
     combined = f"{clean} {en}"
 
-    report_keywords = [
-        "report", "prescription", "parcha", "parchi", "pacha", "petti",
-        "doctor slip", "medical note", "test report", "blood report", "lab report",
-        "xray", "x-ray", "scan report", "discharge summary", "discharge card",
-        "parcha hai", "report hai", "have report", "have some report",
-        "got a report", "brought a report", "show report", "show prescription",
-        "doctor paper", "medical paper", "slip hai",
-        "पर्चा", "रिपोर्ट", "कागज़", "ଡାକ୍ତର ପର୍ଚା", "ରିପୋର୍ଟ", "ପ୍ରେସକ୍ରିପସନ"
+    if not combined.strip():
+        return False
+
+    # Negative markers — if the patient says "no report", "no prescription", "nahi hai", etc., return False
+    negative_markers = [
+        "no", "not", "nahi", "nahin", "nhi", "don't", "dont", "do not", "none",
+        "without", "nothing", "skip", "kuch nahi", "kichhi nahi", "kuchh nahi",
+        "nahi hai", "nahin hai", "nhi hai", "no report", "no prescription", "no paper",
+        "don't have", "dont have", "do not have", "haven't", "havent",
+        "ନାହିଁ", "ନା", "नहीं", "कोई पर्चा नहीं", "कोई रिपोर्ट नहीं",
+        "இல்லை", "లేదు", "না", "নেই", "ഇല്ല", "नाही", "નથી", "ಇಲ್ಲ", "ਨਹੀਂ"
     ]
-    return any(kw in combined for kw in report_keywords)
+    tokens = set(re.findall(r'\b\w+\b', combined.lower()))
+    if any(nm in tokens or nm in combined for nm in negative_markers):
+        return False
+
+    positive_report_signals = [
+        "have report", "have a report", "have some report", "got a report", "brought a report",
+        "show report", "show prescription", "show doctor", "scan report", "upload report",
+        "have prescription", "have a prescription", "got prescription", "brought prescription",
+        "parcha hai", "parchi hai", "report hai", "slip hai", "paper hai", "doctor paper",
+        "achhi", "achi", "yes report", "yes prescription", "yes i have",
+        "पर्चा है", "रिपोर्ट है", "कागज़ है", "ଡାକ୍ତର ପର୍ଚା ଅଛି", "ରିପୋର୍ଟ ଅଛି", "ପ୍ରେସକ୍ରିପସନ ଅଛି",
+        "xray", "x-ray", "blood report", "lab report", "discharge summary"
+    ]
+    if any(sig in combined for sig in positive_report_signals):
+        return True
+
+    # Standalone keywords with affirmative intent
+    standalone_keywords = ["prescription", "report", "parcha", "parchi", "pacha"]
+    has_keyword = any(re.search(rf"\b{re.escape(kw)}\b", combined, re.IGNORECASE) for kw in standalone_keywords)
+    affirmative_words = ["yes", "yeah", "yup", "haan", "ha", "sure", "here", "take", "dikha", "show", "camera", "हाँ", "हां", "ଅଛି", "ହଁ"]
+    has_affirmative = any(re.search(rf"\b{re.escape(aw)}\b", combined, re.IGNORECASE) for aw in affirmative_words)
+
+    if has_keyword and (has_affirmative or len(combined.split()) <= 2):
+        return True
+
+    return False
 
 
 def _get_phase(memory: dict) -> str:
     """
     Determines the current interrogation phase from session memory.
-      phase_1: asking Q1 & Q2 (open disclosure)
-      phase_2: RAG-powered follow-up questions (Pinecone-informed)
-      phase_3: Clinical detail questions (duration, location, severity…)
+      phase_1: asking Q1 & Q2 (open symptom disclosure)
+      phase_2: Rule-based clinical detail gap follow-up questions (driven by temporary memory)
+      phase_prescription_prompt: prompt to upload or show doctor's prescription/report
       complete: summary generated, session done
     """
     return memory.get("phase", "phase_1")
@@ -647,7 +676,7 @@ async def _process_reply(
     # 2a. Proactive Check: If patient mentions having a medical report or prescription to show
     # (e.g. "I have some report", "mere paas parchi hai", "I brought doctor note", etc.)
     # Immediately open camera for OCR without blocking on further text questions!
-    if current_phase in ("phase_1", "phase_2", "phase_3", "phase_prescription_prompt") and _patient_mentions_prescription_or_report(answer_clean, answer_en):
+    if current_phase in ("phase_1", "phase_2", "phase_3") and _patient_mentions_prescription_or_report(answer_clean, answer_en):
         memory["phase"] = "phase_prescription_camera"
         if pending_q:
             pending_q["patient_answer"] = answer_clean
@@ -719,6 +748,19 @@ async def _process_reply(
         pending_q["patient_answer"] = answer_clean
         pending_q["patient_answer_en"] = answer_en
 
+        # Synchronize with temporary clinical memory if answering a gap question
+        if "temporary_clinical_memory" in memory and isinstance(memory["temporary_clinical_memory"], dict):
+            temp_mem = memory["temporary_clinical_memory"]
+            gap_plan = temp_mem.get("gap_plan", [])
+            for g in gap_plan:
+                if g.get("question_text_en") == pending_q.get("question_text_en"):
+                    g["status"] = "answered"
+                    g["patient_answer_en"] = answer_en
+                    break
+            temp_mem["current_gap_index"] = len(
+                [g for g in gap_plan if g.get("status") == "answered"]
+            )
+
     # ─── PHASE 1: Open Symptom Disclosure ─────────────────────────────────
     if current_phase == "phase_1":
         q1_answered = any(
@@ -728,8 +770,14 @@ async def _process_reply(
         q2_obj = next((q for q in questions if q.get("phase") == "phase_1" and q["id"] == 2), None)
 
         if q1_answered and q2_obj is None:
-            # Q1 answered — ask Q2 ("did you miss anything?")
-            q2_data = await sarvam_ai.generate_primary_question(2, lang_name.lower())
+            # Q1 answered — ask Q2 with interactive acknowledgment of stated symptoms
+            q1_entry = next((q for q in questions if q["id"] == 1), None)
+            q1_ans_en = (q1_entry.get("patient_answer_en") if q1_entry else None) or answer_en or ""
+            q1_ans_native = (q1_entry.get("patient_answer") if q1_entry else None) or answer or ""
+            stated_symptoms = await rag_triage.extract_symptom_summary([q1_ans_en]) if q1_ans_en else None
+            q2_data = await sarvam_ai.generate_primary_question(
+                2, lang_name.lower(), stated_symptoms=stated_symptoms, stated_symptoms_native=q1_ans_native
+            )
             q2_entry = {
                 "id": 2,
                 "phase": "phase_1",
@@ -763,40 +811,58 @@ async def _process_reply(
             )
 
         elif q2_obj and q2_obj.get("patient_answer_en"):
-            # Both Q1 and Q2 answered → transition to PHASE 2 (RAG)
+            # Both Q1 and Q2 answered → Patient has stated all presenting symptoms!
+            # Transition to RULE-BASED CLINICAL GAP FOLLOW-UP (NO RAG)
             phase1_answers_en = [
                 q.get("patient_answer_en", "")
                 for q in questions
                 if q.get("phase") == "phase_1" and q.get("patient_answer_en")
             ]
-            symptoms_summary = await rag_triage.extract_symptom_summary(phase1_answers_en)
-            memory["symptoms_summary"] = symptoms_summary
 
-            # Retrieve candidate diseases from Pinecone
-            candidates = await rag_triage.retrieve_candidate_diseases(symptoms_summary, top_k=5)
-            memory["rag_candidates"] = candidates
-
-            # Generate Phase-2 follow-up questions via Sarvam AI
-            already_intents = ["Open symptom disclosure", "Ensure full symptom disclosure"]
-            rag_questions = await rag_triage.generate_rag_followup_questions(
-                symptoms_summary=symptoms_summary,
-                candidate_diseases=candidates,
-                already_asked_intents=already_intents,
+            # 1. LLM analyzes clinical detail gaps across duration, place, depth/severity, diurnal timing, triggers, history
+            gap_analysis = await rag_triage.analyze_clinical_gaps(
+                phase1_answers_en=phase1_answers_en,
                 lang_name=lang_name,
                 lang_code=lang_code,
             )
+            gap_questions = gap_analysis.get("gap_questions", [])
+            symptoms_identified = gap_analysis.get("symptoms_identified", [])
+            symptoms_summary = ", ".join(symptoms_identified) if symptoms_identified else "Reported Symptoms"
+            memory["symptoms_summary"] = symptoms_summary
 
-            # Add Phase 2 questions to memory
+            # 2. Store in TEMPORARY SESSION MEMORY
+            memory["temporary_clinical_memory"] = {
+                "symptoms_identified": symptoms_identified,
+                "already_stated_details": gap_analysis.get("already_stated_details", {}),
+                "total_gaps": len(gap_questions),
+                "current_gap_index": 0,
+                "gap_plan": [
+                    {
+                        "index": idx,
+                        "gap_type": g.get("gap_type", "detail"),
+                        "target_symptom": g.get("target_symptom", "General"),
+                        "clinical_intent": g.get("clinical_intent", "Clinical detail gap"),
+                        "question_text_en": g["question_text_en"],
+                        "question_text": g.get("question_text", g["question_text_en"]),
+                        "status": "pending",
+                        "patient_answer_en": None,
+                    }
+                    for idx, g in enumerate(gap_questions)
+                ],
+            }
+
+            # 3. Add to questions list for the kiosk agent to systematically ask
             q_id = len(questions) + 1
-            for idx, rq in enumerate(rag_questions):
+            for idx, gq in enumerate(gap_questions):
                 questions.append({
                     "id": q_id + idx,
                     "phase": "phase_2",
                     "flag": "not_asked",
-                    "clinical_intent": rq.get("clinical_intent", "RAG differential follow-up"),
-                    "target_differential": rq.get("target_differential", ""),
-                    "question_text_en": rq["question_text_en"],
-                    "question_text": rq.get("question_text", rq["question_text_en"]),
+                    "clinical_intent": gq.get("clinical_intent", "Clinical detail gap"),
+                    "gap_type": gq.get("gap_type", "detail"),
+                    "target_symptom": gq.get("target_symptom", ""),
+                    "question_text_en": gq["question_text_en"],
+                    "question_text": gq.get("question_text", gq["question_text_en"]),
                     "patient_answer": None,
                     "patient_answer_en": None,
                     "timestamp": None,
@@ -809,7 +875,7 @@ async def _process_reply(
                 answer_clean, answer_en, transcribed_text
             )
 
-    # ─── PHASE 2: RAG Follow-up Questions ─────────────────────────────────
+    # ─── PHASE 2: Rule-Based Clinical Detail Gap Follow-up (Driven by Temporary Memory) ───
     elif current_phase == "phase_2":
         remaining = [
             q for q in questions
@@ -817,61 +883,15 @@ async def _process_reply(
         ]
 
         if remaining:
-            # Still have RAG questions to ask
+            # Agent follows temporary memory and asks the next pending detail gap question
             return await _ask_next_in_phase(
                 memory, questions, session_id, patient_id, "phase_2",
                 lang_code, speaker, engine_choice,
                 answer_clean, answer_en, transcribed_text
             )
         else:
-            # Phase 2 complete → generate Phase 3 detail questions
-            candidates = memory.get("rag_candidates", [])
-            symptoms_summary = memory.get("symptoms_summary", "")
-
-            detail_questions = await rag_triage.generate_detail_questions(
-                symptoms_summary=symptoms_summary,
-                candidate_diseases=candidates,
-                lang_name=lang_name,
-                lang_code=lang_code,
-            )
-
-            q_id = len(questions) + 1
-            for idx, dq in enumerate(detail_questions):
-                questions.append({
-                    "id": q_id + idx,
-                    "phase": "phase_3",
-                    "flag": "not_asked",
-                    "clinical_intent": dq.get("clinical_intent", "Clinical detail"),
-                    "detail_type": dq.get("detail_type", ""),
-                    "question_text_en": dq["question_text_en"],
-                    "question_text": dq.get("question_text", dq["question_text_en"]),
-                    "patient_answer": None,
-                    "patient_answer_en": None,
-                    "timestamp": None,
-                })
-
-            memory["phase"] = "phase_3"
-            return await _ask_next_in_phase(
-                memory, questions, session_id, patient_id, "phase_3",
-                lang_code, speaker, engine_choice,
-                answer_clean, answer_en, transcribed_text
-            )
-
-    # ─── PHASE 3: Clinical Detail Questions ────────────────────────────────
-    elif current_phase == "phase_3":
-        remaining = [
-            q for q in questions
-            if q.get("phase") == "phase_3" and q["flag"] == "not_asked"
-        ]
-
-        if remaining:
-            return await _ask_next_in_phase(
-                memory, questions, session_id, patient_id, "phase_3",
-                lang_code, speaker, engine_choice,
-                answer_clean, answer_en, transcribed_text
-            )
-        else:
-            # ── Phase 3 complete → Inquire if patient has medical prescription/report to show ──
+            # All clinical detail gaps in temporary memory have been asked and answered!
+            # Transition directly to prescription/camera check
             memory["phase"] = "phase_prescription_prompt"
 
             rx_q_text = _get_localized_rx_prompt(lang_code)
@@ -895,6 +915,70 @@ async def _process_reply(
                 text=rx_q_text, lang_code=lang_code, speaker=speaker, engine=engine_choice
             )
             await session_memory.save_session(session_id, memory)
+
+            return _build_response(
+                session_id, patient_id, is_complete=False,
+                answer_clean=answer_clean, answer_en=answer_en,
+                transcribed_text=transcribed_text,
+                current_question=rx_q_text,
+                current_question_en=rx_q_en,
+                question_intent="Inquire about prescription/medical report",
+                phase="phase_prescription_prompt",
+                engine_used=engine_used,
+                audio_base64=rx_audio,
+                questions=questions,
+            )
+
+    # ─── PHASE 3: Legacy Fallback Handler (If existing session was in phase 3) ────────────
+    elif current_phase == "phase_3":
+        remaining = [
+            q for q in questions
+            if q.get("phase") == "phase_3" and q["flag"] == "not_asked"
+        ]
+
+        if remaining:
+            return await _ask_next_in_phase(
+                memory, questions, session_id, patient_id, "phase_3",
+                lang_code, speaker, engine_choice,
+                answer_clean, answer_en, transcribed_text
+            )
+        else:
+            memory["phase"] = "phase_prescription_prompt"
+
+            rx_q_text = _get_localized_rx_prompt(lang_code)
+            rx_q_en = "Do you have any doctor's prescription, medical note, or test report to show to the camera?"
+
+            q_id = len(questions) + 1
+            rx_entry = {
+                "id": q_id,
+                "phase": "phase_prescription_prompt",
+                "flag": "asked",
+                "clinical_intent": "Inquire about prescription/medical report",
+                "question_text_en": rx_q_en,
+                "question_text": rx_q_text,
+                "patient_answer": None,
+                "patient_answer_en": None,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            questions.append(rx_entry)
+
+            rx_audio, engine_used = await synthesize_speech(
+                text=rx_q_text, lang_code=lang_code, speaker=speaker, engine=engine_choice
+            )
+            await session_memory.save_session(session_id, memory)
+
+            return _build_response(
+                session_id, patient_id, is_complete=False,
+                answer_clean=answer_clean, answer_en=answer_en,
+                transcribed_text=transcribed_text,
+                current_question=rx_q_text,
+                current_question_en=rx_q_en,
+                question_intent="Inquire about prescription/medical report",
+                phase="phase_prescription_prompt",
+                engine_used=engine_used,
+                audio_base64=rx_audio,
+                questions=questions,
+            )
 
             return {
                 "session_id": session_id,
@@ -1014,10 +1098,6 @@ async def _classify_prescription_inquiry_intent(answer_en: str, answer_clean: st
     en_lower = (answer_en or "").strip().lower()
     combined = f"{en_lower} {clean_lower}"
 
-    # 0. Immediate positive check for report or prescription mention
-    if _patient_mentions_prescription_or_report(answer_clean, answer_en):
-        return "yes"
-
     # 1. Quick check for repeat request
     repeat_words = ["repeat", "again", "say again", "ask again", "hear", "pardon", "sorry", "kya bola", "sunai", "phir se", "samajh nahi"]
     if any(rw in combined for rw in repeat_words):
@@ -1025,30 +1105,41 @@ async def _classify_prescription_inquiry_intent(answer_en: str, answer_clean: st
 
     # 2. Strong negative indicators (with word-boundary matching)
     negative_patterns = [
-        "no", "not", "nahi", "nahin", "don't", "none", "nhi", "kuch nahi",
-        "kichhi nahi", "nothing", "skip", "ନାହିଁ", "ନା", "नहीं", "कोई पर्चा नहीं",
+        "no", "not", "nahi", "nahin", "don't", "dont", "do not", "none", "nhi", "kuch nahi",
+        "kichhi nahi", "nothing", "skip", "no report", "no prescription", "don't have",
+        "without", "ନାହିଁ", "ନା", "नहीं", "कोई पर्चा नहीं", "कोई रिपोर्ट नहीं",
         "இல்லை", "illai", "లేదు", "ledu", "না", "নেই",
         "ഇല്ല", "illa", "नाही", "નથી", "nathi", "ಇಲ್ಲ", "ਨਹੀਂ"
     ]
-    # 3. Strong positive indicators
+    tokens = set(re.findall(r'\b\w+\b', combined.lower()))
+    has_neg = any(nw.lower() in tokens or nw.lower() in combined for nw in negative_patterns)
+
+    # 3. Strong affirmative/positive indicators (DO NOT include bare "report" or "prescription" here)
     positive_patterns = [
-        "yes", "yeah", "yup", "sure", "have", "present", "prescription", "report",
-        "parcha", "pacha", "dikha", "show", "upload", "scan", "camera", "photo",
+        "yes", "yeah", "yup", "sure", "have", "present",
+        "parcha hai", "report hai", "have report", "have prescription", "got report", "got prescription",
+        "dikha", "show", "upload", "scan", "camera", "photo",
         "achhi", "achi", "haan", "ha", "hai", "हाँ", "हां", "ଅଛି", "ହଁ", "ଦେଖାଇବି", "दिखाना",
         "ஆம்", "உள்ளது", "aam", "ullathu", "అవును", "ఉంది", "avunu", "undi",
         "হ্যাঁ", "আছে", "hyan", "achhe", "അതെ", "ഉണ്ട്", "athe", "undu",
         "होय", "आहे", "hoy", "aahe", "હા", "છે", "haa", "chhe",
         "ಹೌದು", "ಇದೆ", "haudu", "ide", "ਹਾਂ", "ਹੈ"
     ]
-
-    tokens = set(re.findall(r'\b\w+\b', combined.lower()))
-    has_neg = any(nw.lower() in tokens or nw.lower() in combined for nw in negative_patterns)
     has_pos = any(pw.lower() in tokens or pw.lower() in combined for pw in positive_patterns)
+
+    if has_neg:
+        # If there's an explicit negation phrase regarding report/prescription, it is definitely NO
+        if any(neg in combined for neg in ["no report", "no prescription", "don't have", "dont have", "nahi hai", "nahin hai", "kuch nahi", "kichhi nahi", "nothing", "skip"]):
+            return "no"
+        if not has_pos:
+            return "no"
 
     if has_pos and not has_neg:
         return "yes"
-    if has_neg and not has_pos:
-        return "no"
+
+    # Secondary check with positive report phrases
+    if _patient_mentions_prescription_or_report(answer_clean, answer_en):
+        return "yes"
 
     # 4. If ambiguous, use Sarvam LLM
     try:
@@ -1073,7 +1164,7 @@ async def _classify_prescription_inquiry_intent(answer_en: str, answer_clean: st
             return "no"
     except Exception as e:
         print(f"[Kiosk] Prescription intent classification exception: {e}")
-        return "yes" if has_pos else "no"
+        return "no"
 
 
 # ── Answer Adequacy Validator ──────────────────────────────────────────────
@@ -1184,6 +1275,8 @@ async def _ask_next_in_phase(
         engine_used=engine_used,
         audio_base64=audio,
         questions=questions,
+        temporary_clinical_memory=memory.get("temporary_clinical_memory"),
+        symptoms_summary=memory.get("symptoms_summary"),
     )
 
 
@@ -1192,8 +1285,10 @@ def _build_response(
     transcribed_text, current_question, current_question_en,
     question_intent, phase, engine_used, audio_base64, questions,
     repeat_requested: bool = False,
+    temporary_clinical_memory: Optional[dict] = None,
+    symptoms_summary: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return {
+    res = {
         "session_id": session_id,
         "patient_id": patient_id,
         "is_complete": is_complete,
@@ -1209,6 +1304,11 @@ def _build_response(
         "repeat_requested": repeat_requested,  # True when AI re-asks same question
         "questions_status": _build_questions_status(questions),
     }
+    if temporary_clinical_memory is not None:
+        res["temporary_clinical_memory"] = temporary_clinical_memory
+    if symptoms_summary is not None:
+        res["symptoms_summary"] = symptoms_summary
+    return res
 
 
 
@@ -1279,6 +1379,27 @@ async def _finalize_session_summary(
         memory["prescription_data"] = prescription_data
     await session_memory.save_session(session_id, memory)
 
+    # ── Index real conversation turns into Pinecone index 'astra-conversation' ──
+    try:
+        dialogue_turns = ai_summary.get("dialogue_turns") or []
+        if not dialogue_turns and "questions" in memory:
+            dialogue_turns = [
+                {
+                    "turn_number": q.get("id"),
+                    "question": q.get("question_text_en") or q.get("question_text"),
+                    "answer": q.get("patient_answer_en") or q.get("patient_answer"),
+                    "timestamp": q.get("timestamp"),
+                    "phase": q.get("phase", "interrogation"),
+                    "intent": q.get("clinical_intent", ""),
+                }
+                for q in memory.get("questions", [])
+                if q.get("patient_answer_en") or q.get("patient_answer")
+            ]
+        if dialogue_turns:
+            await conversation_rag.index_patient_conversation(patient_id, dialogue_turns, session_id=session_id)
+    except Exception as e:
+        print(f"[Kiosk] Error indexing conversation into Pinecone: {e}")
+
     return {
         "session_id": session_id,
         "patient_id": patient_id,
@@ -1298,6 +1419,8 @@ async def _finalize_session_summary(
         "prescription": prescription_data,
         "next_stage": "pending_verification",
         "questions_status": _build_questions_status(memory.get("questions", [])),
+        "temporary_clinical_memory": memory.get("temporary_clinical_memory"),
+        "symptoms_summary": memory.get("symptoms_summary"),
     }
 
 
@@ -1442,7 +1565,13 @@ async def upload_prescription_photo(
             q1_answered = any(q["id"] == 1 and q.get("patient_answer_en") for q in questions)
             q2_obj = next((q for q in questions if q.get("phase") == "phase_1" and q["id"] == 2), None)
             if q1_answered and q2_obj is None:
-                q2_data = await sarvam_ai.generate_primary_question(2, lang_name.lower())
+                q1_entry = next((q for q in questions if q["id"] == 1), None)
+                q1_ans_en = (q1_entry.get("patient_answer_en") if q1_entry else None) or ""
+                q1_ans_native = (q1_entry.get("patient_answer") if q1_entry else None) or ""
+                stated_symptoms = await rag_triage.extract_symptom_summary([q1_ans_en]) if q1_ans_en else None
+                q2_data = await sarvam_ai.generate_primary_question(
+                    2, lang_name.lower(), stated_symptoms=stated_symptoms, stated_symptoms_native=q1_ans_native
+                )
                 q2_entry = {
                     "id": 2,
                     "phase": "phase_1",
@@ -1477,27 +1606,44 @@ async def upload_prescription_photo(
                 }
             elif q2_obj and q2_obj.get("patient_answer_en"):
                 phase1_answers_en = [q.get("patient_answer_en", "") for q in questions if q.get("phase") == "phase_1" and q.get("patient_answer_en")]
-                symptoms_summary = await rag_triage.extract_symptom_summary(phase1_answers_en)
-                memory["symptoms_summary"] = symptoms_summary
-                candidates = await rag_triage.retrieve_candidate_diseases(symptoms_summary, top_k=5)
-                memory["rag_candidates"] = candidates
-                rag_questions = await rag_triage.generate_rag_followup_questions(
-                    symptoms_summary=symptoms_summary,
-                    candidate_diseases=candidates,
-                    already_asked_intents=["Open symptom disclosure", "Ensure full symptom disclosure"],
+                gap_analysis = await rag_triage.analyze_clinical_gaps(
+                    phase1_answers_en=phase1_answers_en,
                     lang_name=lang_name,
                     lang_code=lang_code,
                 )
+                gap_questions = gap_analysis.get("gap_questions", [])
+                symptoms_identified = gap_analysis.get("symptoms_identified", [])
+                memory["symptoms_summary"] = ", ".join(symptoms_identified) if symptoms_identified else "Reported Symptoms"
+                memory["temporary_clinical_memory"] = {
+                    "symptoms_identified": symptoms_identified,
+                    "already_stated_details": gap_analysis.get("already_stated_details", {}),
+                    "total_gaps": len(gap_questions),
+                    "current_gap_index": 0,
+                    "gap_plan": [
+                        {
+                            "index": idx,
+                            "gap_type": g.get("gap_type", "detail"),
+                            "target_symptom": g.get("target_symptom", "General"),
+                            "clinical_intent": g.get("clinical_intent", "Clinical detail gap"),
+                            "question_text_en": g["question_text_en"],
+                            "question_text": g.get("question_text", g["question_text_en"]),
+                            "status": "pending",
+                            "patient_answer_en": None,
+                        }
+                        for idx, g in enumerate(gap_questions)
+                    ],
+                }
                 q_id = len(questions) + 1
-                for idx, rq in enumerate(rag_questions):
+                for idx, gq in enumerate(gap_questions):
                     questions.append({
                         "id": q_id + idx,
                         "phase": "phase_2",
                         "flag": "not_asked",
-                        "clinical_intent": rq.get("clinical_intent", "RAG differential follow-up"),
-                        "target_differential": rq.get("target_differential", ""),
-                        "question_text_en": rq["question_text_en"],
-                        "question_text": rq.get("question_text", rq["question_text_en"]),
+                        "clinical_intent": gq.get("clinical_intent", "Clinical detail gap"),
+                        "gap_type": gq.get("gap_type", "detail"),
+                        "target_symptom": gq.get("target_symptom", ""),
+                        "question_text_en": gq["question_text_en"],
+                        "question_text": gq.get("question_text", gq["question_text_en"]),
                         "patient_answer": None,
                         "patient_answer_en": None,
                         "timestamp": None,
@@ -1526,33 +1672,10 @@ async def upload_prescription_photo(
                 resp["prescription_data"] = result
                 return resp
             else:
-                candidates = memory.get("rag_candidates", [])
-                symptoms_summary = memory.get("symptoms_summary", "")
-                detail_questions = await rag_triage.generate_detail_questions(
-                    symptoms_summary=symptoms_summary,
-                    candidate_diseases=candidates,
-                    lang_name=lang_name,
-                    lang_code=lang_code,
-                )
-                q_id = len(questions) + 1
-                for idx, dq in enumerate(detail_questions):
-                    questions.append({
-                        "id": q_id + idx,
-                        "phase": "phase_3",
-                        "flag": "not_asked",
-                        "clinical_intent": dq.get("clinical_intent", "Clinical detail"),
-                        "detail_type": dq.get("detail_type", ""),
-                        "question_text_en": dq["question_text_en"],
-                        "question_text": dq.get("question_text", dq["question_text_en"]),
-                        "patient_answer": None,
-                        "patient_answer_en": None,
-                        "timestamp": None,
-                    })
-                memory["phase"] = "phase_3"
-                resp = await _ask_next_in_phase(
-                    memory, questions, session_id, patient_id, "phase_3",
-                    lang_code, speaker, engine_choice,
-                    "Medical report uploaded", "Medical report uploaded", None
+                memory["phase"] = "phase_prescription_prompt"
+                resp = await _finalize_session_summary(
+                    session_id, patient_id, memory, questions,
+                    lang_code, speaker, engine_choice, prescription_data=result
                 )
                 resp["success"] = True
                 resp["open_camera"] = False

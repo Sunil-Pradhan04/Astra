@@ -22,3 +22,22 @@ export const getDoctorDeskQueue = () =>
 
 export const submitDoctorPrescription = (patientId, data) =>
   api.post(`/doctors/desk/prescriptions/${patientId}`, data)
+
+// ── RAG Interrogation Chatbot ──────────────────────────────────────────────
+export const askDoctorInterrogationChatbot = (patientId, query) =>
+  api.post(`/doctors/desk/${patientId}/chat-interrogation`, { query })
+
+// ── Clinical Referrals (Inside Hospital & Hospital-to-Another) ─────────────
+export const getInternalDoctors = () =>
+  api.get('/doctors/internal-doctors')
+
+export const referPatientInternal = (patientId, data) =>
+  api.post(`/doctors/desk/refer-internal/${patientId}`, data)
+
+export const generateAiReferralNote = (patientId, data) =>
+  api.post(`/doctors/desk/generate-referral-note/${patientId}`, data)
+
+export const referPatientExternal = (patientId, data) =>
+  api.post(`/doctors/desk/refer-external/${patientId}`, data)
+
+

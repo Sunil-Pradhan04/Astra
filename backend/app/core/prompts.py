@@ -58,11 +58,17 @@ PRIMARY_QUESTION_1_SYSTEM = (
 )
 
 PRIMARY_QUESTION_2_SYSTEM = (
-    "You are a compassionate clinical AI triage assistant at a healthcare kiosk. "
-    "Communicate courteously and encouragingly in the patient's preferred language."
+    "You are a compassionate, conversational clinical AI triage assistant at a healthcare kiosk. "
+    "Acknowledge the symptoms the patient just described warmly and respectfully. "
+    "Then ask them interactively whether they are facing any other problems, symptoms, or discomfort, and invite them to share if so."
 )
 
-def build_primary_question_prompt(question_number: int, lang_name: str, q_en: str) -> str:
+def build_primary_question_prompt(
+    question_number: int,
+    lang_name: str,
+    q_en: str,
+    stated_symptoms: Optional[str] = None
+) -> str:
     """Builds prompt for generating starting discovery questions (Q1 / Q2)."""
     if question_number == 1:
         return (
@@ -72,10 +78,17 @@ def build_primary_question_prompt(question_number: int, lang_name: str, q_en: st
             f"Do NOT include English translation, notes, or quotes."
         )
     else:
+        symptoms_mention = f"'{stated_symptoms}'" if stated_symptoms else "their reported symptoms"
         return (
             f"The patient speaks {lang_name}.\n"
-            f"Ask the patient empathetically if they missed anything or have any further details to share: '{q_en}'\n"
-            f"Output ONLY the question in {lang_name} script with courteous, encouraging phrasing. "
+            f"The patient previously mentioned experiencing {symptoms_mention}.\n"
+            f"Translate and adapt the following interactive inquiry into natural, polite {lang_name} in its native script:\n"
+            f"'{q_en}'\n"
+            f"Requirements:\n"
+            f"- Acknowledge the symptoms they stated.\n"
+            f"- Ask if they are facing any other problems, pain, or difficulties besides those.\n"
+            f"- If yes, invite them to speak freely.\n"
+            f"Output ONLY the translated question in {lang_name} script with respectful, conversational phrasing. "
             f"Do NOT include English translation, notes, or quotes."
         )
 
@@ -100,8 +113,68 @@ def build_symptom_extraction_prompt(narrative_en: str) -> str:
 
 
 # ==============================================================================
-# SECTION 4: PHASE 2 — RAG DIFFERENTIAL FOLLOW-UP QUESTIONS PROMPT
+# SECTION 4: RULE-BASED CLINICAL DETAIL GAP ANALYSIS & FOLLOW-UP PROMPTS
 # ==============================================================================
+
+CLINICAL_GAP_ANALYSIS_SYSTEM = (
+    "You are an expert Clinical Diagnostic Assistant at an automated healthcare kiosk. "
+    "A patient has reported their presenting symptoms during the initial discovery questions. "
+    "Your objective is to identify all clinical detail gaps regarding the reported symptoms. "
+    "Specifically evaluate the 6 fundamental clinical dimensions:\n"
+    "1. DURATION & TIMELINE: When did each symptom begin, how long has it lasted, and has it progressed over time?\n"
+    "2. PLACE & LOCATION: Where precisely on the body is the discomfort located, and does it radiate or spread?\n"
+    "3. DEPTH, SENSATION & SEVERITY: What is the character/depth of the sensation (e.g. sharp, dull throbbing, crushing, burning, tickle), and what is the severity rating on a 1 to 10 scale?\n"
+    "4. DIURNAL TIMING & PATTERN: Is there any specific diurnal timing (e.g. evening fever spikes with chills, nocturnal cough, morning stiffness), and is it continuous or episodic?\n"
+    "5. TRIGGERS & RELIEVING FACTORS: What activities or factors aggravate it (exertion, cold air, eating, posture), and what eases or relieves it?\n"
+    "6. PRIOR MEDICATIONS & MEDICAL HISTORY: Has the patient taken any medicines (e.g. Paracetamol, antibiotics), and do they have chronic conditions (e.g. hypertension, diabetes)?\n\n"
+    "CRITICAL RULES:\n"
+    "- If the patient ALREADY clearly stated any of the above parameters in their narrative, do NOT ask for it again.\n"
+    "- Formulate 4 to 5 empathetic, highly targeted follow-up questions to fill the missing gaps.\n"
+    "- Each question must be in canonical English ('question_text_en') and translated into the patient's language ('question_text') in native script.\n"
+    "- Respond ONLY with a valid JSON object matching the requested schema."
+)
+
+def build_clinical_gap_prompt(
+    phase1_narrative_en: str,
+    lang_name: str,
+    lang_code: str
+) -> str:
+    """Builds prompt to analyze clinical gaps in stated symptoms and formulate rule-based follow-up questions."""
+    return f"""PATIENT'S STATED SYMPTOMS & PRESENTING DISCLOSURE (English):
+"{phase1_narrative_en.strip()}"
+
+PATIENT'S SPOKEN LANGUAGE: {lang_name} ({lang_code})
+
+TASK:
+1. Extract all clinical symptoms mentioned by the patient.
+2. Note which clinical details the patient already provided.
+3. Identify the missing detail gaps across:
+   - duration
+   - place_location
+   - depth_severity
+   - diurnal_timing
+   - triggers_relieving
+   - medications_history
+4. Formulate exactly 4 to 5 targeted follow-up questions to fill these clinical gaps.
+5. Translate each question into {lang_name} in its native script. Always provide 'question_text_en' in clear English.
+
+Return this exact JSON structure:
+{{
+  "symptoms_identified": ["<symptom 1>", "<symptom 2>"],
+  "already_stated_details": {{
+    "<symptom>": "<details patient already gave>"
+  }},
+  "gap_questions": [
+    {{
+      "gap_type": "duration | place_location | depth_severity | diurnal_timing | triggers_relieving | medications_history",
+      "target_symptom": "<symptom name or 'General'>",
+      "clinical_intent": "<short clinical intent description>",
+      "question_text_en": "<clear, compassionate clinical question in English>",
+      "question_text": "<natural, polite question in {lang_name} script>"
+    }}
+  ]
+}}"""
+
 
 RAG_FOLLOWUP_SYSTEM = (
     "You are an expert Clinical Diagnostic AI at a primary healthcare kiosk. "
@@ -205,12 +278,19 @@ Return this exact JSON:
 
 FINAL_SUMMARY_SYSTEM = (
     "You are an expert Chief Medical Officer and Clinical AI Triage Engine at a primary healthcare kiosk. "
-    "Analyze the patient interview dialogue and any attached medical document data to generate a rigorous, clean clinical triage summary. "
-    "MANDATORY CLINICAL ACCURACY RULES:\n"
-    "1. Show ONLY confirmed clinical information that was explicitly stated by the patient or found in the attached medical document.\n"
-    "2. NEVER write placeholder phrases like 'Not available', 'Not reported', 'N/A', 'None stated', 'None', or 'Unknown'. If depth, duration, pattern, or triggers are not stated, set that field to null or omit it entirely. Never guess.\n"
-    "3. Analyze all available symptoms, their timelines (duration and onset), and intensity/depth.\n"
-    "4. If an attached printed medical report is provided, cross-link and map all relevant findings (e.g. low blood pressure, high glucose, abnormal lab values, prescribed medications) directly under each corresponding symptom in 'report_correlation'.\n"
+    "Analyze the patient interview dialogue and any attached medical document data to generate an exhaustive, highly rigorous clinical triage dossier. "
+    "MANDATORY CLINICAL ACCURACY AND EXTRACTION DIRECTIVES:\n"
+    "1. FIELD 1 — ALL SYMPTOMS OVERVIEW: Provide 'all_symptoms_overview' containing strictly a list of every symptom reported by the patient. Do NOT include disease names or speculative diagnoses here.\n"
+    "2. FIELD 2 — SYMPTOM DEEP-DIVE: Under 'symptoms_deep_dive', provide an exhaustive clinical breakdown for EACH identified symptom:\n"
+    "   - 'name': Clinical symptom name (e.g. High Fever, Frontal Headache, Dry Cough, Low Blood Pressure).\n"
+    "   - 'timeline': Specific onset, progression, and duration (e.g. 'Started 3 days ago, progressive worsening since yesterday').\n"
+    "   - 'depth_and_severity': Depth, character, and severity rating (e.g. 'Deep retrosternal dull pressure rated 7/10 depth', 'Mild superficial tickle').\n"
+    "   - 'timing_and_diurnal_pattern': Exact temporal timing and diurnal variation. ALWAYS explicitly capture diurnal nuances (e.g. 'Fever spikes specifically in the evening around 5-6 PM with chills, subsides towards morning', 'Cough worsens at night while recumbent').\n"
+    "   - 'triggers_and_relieving': Aggravating and relieving factors (e.g. 'Triggered by cold air and exertion; partially relieved by warm liquids and recumbent rest').\n"
+    "   - 'patient_disclosed_details': CRITICAL: Comprehensive account of EVERYTHING the patient stated about this symptom during the interrogation. You may synthesize and clarify clinical language, but you MUST NOT MISS A SINGLE DETAIL or statement the patient disclosed.\n"
+    "   - 'ocr_report_correlation': If the attached printed medical report contains corroborating findings (e.g. BP 90/60 mmHg, high oral temp 102.4 °F, prescribed Paracetamol), state exact evidence prefixed with 'Extracted from Uploaded Report: <finding>'. If no report match, set to null.\n"
+    "3. NO SPECULATIVE DIAGNOSES OR PERCENTAGES: Do NOT output candidate diseases or retrieval percentage match scores (such as 'FLU match 70%'). The attending physician will evaluate symptoms and establish the clinical diagnosis.\n"
+    "4. NEVER write placeholder phrases like 'Not available', 'Not reported', 'N/A', 'None stated', or 'Unknown'. Use null for unstated fields.\n"
     "5. Respond ONLY with a strictly valid JSON object without markdown formatting, code fences, or preamble."
 )
 
@@ -228,7 +308,7 @@ def build_final_summary_prompt(
         doc_class = prescription_data.get("classification", "printed")
         if doc_class == "printed" and structured:
             doc_section = f"""
-ATTACHED MEDICAL DOCUMENT FINDINGS (Printed Report / Prescription):
+ATTACHED MEDICAL DOCUMENT FINDINGS (Printed Report / Prescription Extracted by OCR):
 - Report Type: {structured.get('report_type', 'Medical Report')}
 - Doctor / Clinic: {structured.get('doctor_name') or structured.get('facility_name') or 'Clinical Laboratory'}
 - Date of Document: {structured.get('document_date', 'Recent')}
@@ -238,45 +318,46 @@ ATTACHED MEDICAL DOCUMENT FINDINGS (Printed Report / Prescription):
 - Doctor Advice / Instructions: {json.dumps(structured.get('doctor_advice_and_instructions', []))}
 
 CRITICAL MAPPING INSTRUCTION:
-For each symptom listed in 'symptoms', verify whether the attached report contains related or corroborating clinical data (for example: if patient complains of low blood pressure, dizziness, or weakness, and the report shows BP 90/60 mmHg or hypotension diagnosis, write that exact evidence into 'report_correlation' under that symptom). If a symptom has no matching report evidence, set 'report_correlation' to null.
+For each symptom listed in 'symptoms_deep_dive', check if the attached report contains related clinical evidence. If found, include it in 'ocr_report_correlation' with prefix 'Extracted from Uploaded Report: ...'. If not related, set 'ocr_report_correlation' to null.
 """
         elif doc_class == "handwritten":
             doc_section = """
 ATTACHED MEDICAL DOCUMENT:
-- Handwritten prescription attached for direct physician visual inspection.
+- Handwritten prescription/note attached. Text extraction bypassed for visual doctor review.
 """
 
     return f"""PATIENT INTERVIEW DIALOGUE (All turns in English):
 {json.dumps(dialogue_turns, indent=2)}
-
-TOP CANDIDATE DISEASES FROM VECTOR SEARCH:
-{json.dumps(candidate_diseases[:4], indent=2)}
 {doc_section}
 PATIENT PREFERRED LANGUAGE: {lang_name} ({lang_code})
 
-Generate this clean clinical JSON. (Do NOT write 'Not available' or 'N/A' anywhere; use null when data is missing):
+Generate this exhaustive clinical JSON. (Do NOT write 'Not available' or 'N/A' anywhere; use null when data is missing):
 {{
-  "chief_complaints": "<concise clinical description of verified presenting symptoms>",
+  "all_symptoms_overview": [
+    "<Symptom name 1, e.g. High Fever>",
+    "<Symptom name 2, e.g. Frontal Throbbing Headache>"
+  ],
+  "symptoms_deep_dive": [
+    {{
+      "name": "<symptom name, e.g. High Fever>",
+      "timeline": "<onset and duration timeline, e.g. Started 3 days ago, progressive worsening>",
+      "depth_and_severity": "<depth, character, and severity score, e.g. High intensity, 7/10 depth, dull throbbing>",
+      "timing_and_diurnal_pattern": "<exact diurnal pattern, e.g. Fever comes specifically in the evening around 5-6 PM with chills, subsides towards morning>",
+      "triggers_and_relieving": "<aggravating and relieving factors, e.g. Aggravated by cold air; partially relieved by warm fluids and rest>",
+      "patient_disclosed_details": "<COMPREHENSIVE statement: everything the patient stated about this symptom during interrogation. Do NOT omit any single fact, sensation, time, or detail>",
+      "ocr_report_correlation": "<'Extracted from Uploaded Report: ...' if matching report evidence exists, or null>"
+    }}
+  ],
+  "chief_complaints": "<concise clinical synthesis of verified presenting complaints>",
   "overall_duration": "<overall timeline if stated, e.g. 3 days, or null>",
   "overall_severity": "Mild | Moderate | Severe | Critical",
   "triage_urgency": "Emergency | Priority | Routine",
   "urgency_reason": "<clear clinical justification for this urgency classification>",
   "pain_and_sensitivity": {{
-    "score": "<e.g. 8/10 or null if not stated>",
+    "score": "<e.g. 7/10 or null>",
     "intensity": "<Mild | Moderate | Severe | Excruciating or null>",
     "sensitivity_triggers": "<specific sensitivity factors: photophobia, cold, touch, movement, or null>"
   }},
-  "symptoms": [
-    {{
-      "name": "<symptom name, e.g. Low Blood Pressure / Dizziness>",
-      "duration": "<specific timeline for this symptom, e.g. 3 days, or null>",
-      "severity": "<severity rating or depth, e.g. Moderate, or null>",
-      "location": "<anatomical location, or null>",
-      "pattern": "<constant | intermittent | progressive | episodic, or null>",
-      "triggers": "<sensitivity or triggers, or null>",
-      "report_correlation": "<exact correlated finding from attached medical report if applicable, e.g. 'Report confirms Blood Pressure 90/60 mmHg (Hypotension)', or null>"
-    }}
-  ],
   "ruled_out": ["<symptoms specifically denied by patient>"],
   "affected_body_areas": ["<anatomical areas affected>"],
   "aggravating_and_relieving": {{
@@ -288,15 +369,8 @@ Generate this clean clinical JSON. (Do NOT write 'Not available' or 'N/A' anywhe
     "chronic_conditions": "<existing chronic diseases/history or null>",
     "allergies": "<reported allergies or null>"
   }},
-  "suspected_conditions": [
-    {{
-      "condition": "<suspected condition name>",
-      "matching_symptoms": "<patient symptoms matching this condition>",
-      "confidence": "High | Moderate | Low"
-    }}
-  ],
   "red_flags": ["<warning signs detected, or empty list if none>"],
-  "clinical_notes": "<comprehensive doctor-ready clinical narrative synthesizing history of presenting illness, key differentials, and clinical recommendation>",
+  "clinical_notes": "<synthesized objective clinical history of presenting illness and kiosk observations for the doctor>",
   "concluding_message_en": "Thank you. Your symptoms have been thoroughly recorded. A healthcare professional will examine you shortly.",
   "concluding_message": "<same message in {lang_name} - polite, reassuring, professional>"
 }}"""
@@ -548,6 +622,58 @@ def build_urgency_verification_prompt(
         f"Triggered Term / Phrase: {matched_phrase or 'Semantic match'}\n\n"
         f"Evaluate whether this is a true acute emergency requiring immediate interview halt, or a mild/routine symptom where the interview should move forward.\n"
         f"Respond with JSON ONLY:"
+    )
+
+
+# ==============================================================================
+# SECTION 12: CLINICAL REFERRAL NOTE GENERATION PROMPTS
+# ==============================================================================
+
+CLINICAL_REFERRAL_NOTE_SYSTEM = (
+    "You are an expert Chief Medical Officer and Senior Clinical Referral Officer at Astra Health Network.\n"
+    "Your objective is to generate an authoritative, highly comprehensive, and legally robust official "
+    "Hospital-to-Hospital Medical Referral & Transfer Memorandum based on the attending physician's referral inputs.\n\n"
+    "MANDATORY FORMATTING & CLINICAL RULES:\n"
+    "1. STRUCTURE THE REFERRAL NOTE INTO CLEAR, TITLED SECTIONS USING BULLET POINTS AND PARAGRAPHS.\n"
+    "2. INCLUDE:\n"
+    "   • OFFICIAL REFERRAL MEMORANDUM HEADER (Referring Facility, Attending Doctor, Date/Time, Urgency Level)\n"
+    "   • PATIENT SUMMARY & RECORDED VITALS (Name, ID, Age/Gender, BP, Pulse/Temp, Baseline Status)\n"
+    "   • PROVISIONAL / WORKING DIAGNOSIS\n"
+    "   • CHIEF COMPLAINTS & CLINICAL COURSE\n"
+    "   • PRIMARY REASON & JUSTIFICATION FOR EXTERNAL TRANSFER (Why higher level care is medically necessary)\n"
+    "   • PRE-TRANSFER STABILIZATION MEASURES & MEDICATIONS ADMINISTERED\n"
+    "   • RECOMMENDED LEVEL OF CARE & EN ROUTE MONITORING INSTRUCTIONS (Ambulance type, oxygen, paramedic escort)\n"
+    "3. Maintain a formal, precise, and objective medical tone appropriate for tertiary hospital specialists.\n"
+    "4. Do NOT hallucinate unmentioned medical conditions, but formulate professional transfer protocols for the specified diagnosis."
+)
+
+def build_clinical_referral_note_prompt(
+    patient_name: str,
+    patient_id: str,
+    age: int,
+    gender: str,
+    vitals_text: str,
+    chief_complaints: str,
+    reason_for_referral: str,
+    possible_diagnosis: str,
+    referring_doctor_name: str,
+    referring_facility_name: str,
+    urgency: str = "Urgent",
+    clinical_notes: Optional[str] = None,
+) -> str:
+    """Builds prompt for generating the comprehensive AI referral note."""
+    return (
+        f"PATIENT NAME: {patient_name} (ID: {patient_id})\n"
+        f"AGE / GENDER: {age} years / {gender}\n"
+        f"RECORDED BIOMARKERS & VITALS: {vitals_text}\n"
+        f"CHIEF COMPLAINTS & INTERROGATION: {chief_complaints or 'None recorded'}\n"
+        f"REFERRING PHYSICIAN: Dr. {referring_doctor_name}\n"
+        f"REFERRING FACILITY: {referring_facility_name}\n"
+        f"PROVISIONAL / WORKING DIAGNOSIS: {possible_diagnosis}\n"
+        f"REASON FOR EXTERNAL REFERRAL: {reason_for_referral}\n"
+        f"REFERRAL URGENCY: {urgency}\n"
+        f"ATTENDING DOCTOR CLINICAL NOTES / BEDSIDE MEASURES: {clinical_notes or 'Standard pre-referral supportive care'}\n\n"
+        f"Draft the complete, official, structured Hospital Referral Transfer Memorandum:"
     )
 
 

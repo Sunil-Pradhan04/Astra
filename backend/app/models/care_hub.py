@@ -6,6 +6,8 @@ from pymongo import IndexModel, ASCENDING
 CARE_HUB_TYPES = [
     "Government Hospital",
     "Primary Health Center (PHC)",
+    "Community Health Center (CHC)",
+    "District / Tertiary Hospital",
     "Public Health Camp",
     "Company Clinic",
     "Industrial Health Unit",

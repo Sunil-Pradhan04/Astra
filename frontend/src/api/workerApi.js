@@ -99,3 +99,22 @@ export const dispensePatientMedicine = (patientId) => {
   })
 }
 
+// ── RAG Interrogation Chatbot for Verification Desk ───────────────────────
+export const askWorkerInterrogationChatbot = (patientId, query) =>
+  axios.post(`/patients/${patientId}/chat-interrogation`, { query })
+
+// ── External Referral Radar & Dispatch ─────────────────────────────────────
+export const getNearbyFacilities = (params = {}) =>
+  axios.get('/care-hub/nearby-facilities', { params })
+
+export const dispatchExternalReferral = (patientId, data) => {
+  const worker = JSON.parse(localStorage.getItem('worker_info') || '{}')
+  return axios.post(`/patients/${patientId}/dispatch-external-referral`, {
+    ...data,
+    worker_id: data.worker_id || worker.worker_id || 'HW-VERIFIER',
+    worker_name: data.worker_name || worker.full_name || 'Mid-Level Health Worker',
+  })
+}
+
+
+

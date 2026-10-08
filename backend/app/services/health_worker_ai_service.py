@@ -94,16 +94,27 @@ class HealthWorkerAiService:
         """
         Interprets health worker instructions and applies clinical updates to report fields.
         """
+        dialogue_turns = (
+            patient_data.get("dialogue_turns")
+            or (patient_data.get("ai_summary") or {}).get("dialogue_turns")
+            or (patient_data.get("ai_summary") or {}).get("structured_summary", {}).get("dialogue_turns")
+            or []
+        )
+
         system_prompt = (
-            "You are an expert Clinical AI Medical Co-Pilot assistant for a Mid-Level Health Worker at a hospital / care hub. "
-            "Your job is to update a patient's pre-consultation clinical triage report based on instructions from the health worker.\n"
-            "CRITICAL INSTRUCTIONS:\n"
-            "1. Accurately modify patient vitals, chief complaints, symptoms, candidate conditions, triage priority, or clinical notes as requested.\n"
-            "2. If the health worker reports new symptoms, add them to the symptoms list with clear clinical attributes (duration, severity, location).\n"
-            "3. If the health worker reports vitals (e.g., BP 135/85, Temp 101.4 F, Weight 68 kg), extract them cleanly.\n"
-            "4. If priority escalation is indicated (e.g. 'urgent', 'critical', 'emergency', chest pain, severe distress), change priority to 'emergency' and urgency_level to 'red'.\n"
-            "5. If priority downgrade is indicated, set priority to 'normal' and urgency_level to 'green' or 'yellow'.\n"
-            "6. Always return a strictly valid JSON object without markdown formatting, code fences, or extra commentary."
+            "You are an expert Clinical AI Medical Co-Pilot assistant for a Health Worker / Reviewer and Attending Doctor at a hospital / care hub.\n"
+            "Your role has TWO capabilities:\n"
+            "1. CASE INQUIRY & INTERROGATION Q&A: If the health worker or reviewer asks a question about what the patient disclosed during kiosk interrogation "
+            "(e.g., 'What did the patient say about fever timing?', 'Did they report evening symptoms?', 'What did they say about chest pain?', 'Any known allergies?'), "
+            "provide a comprehensive, factual, and medically coherent clinical answer in `ai_reply` referencing what the patient stated during interrogation. "
+            "In this inquiry mode, DO NOT modify patient fields: set `changes_applied` to [] and leave all keys in `updated_fields` as null or empty.\n\n"
+            "2. REPORT FIELD UPDATE: If the health worker instructs an update (e.g., 'Add dry cough for 3 days', 'Update BP to 135/85', 'Escalate to Emergency'), "
+            "accurately populate `updated_fields`, summarize the change in `ai_reply`, and provide clean bullet points in `changes_applied`.\n"
+            "CRITICAL RULES FOR UPDATES:\n"
+            "- New symptoms should include name, duration, severity, location, pattern, triggers.\n"
+            "- If priority escalation is indicated ('emergency', 'critical', 'urgent', chest pain, distress), set priority to 'emergency' and urgency_level to 'red'.\n"
+            "- If priority downgrade is indicated, set priority to 'normal' and urgency_level to 'green'.\n"
+            "- Return strictly valid JSON matching the requested schema."
         )
 
         user_prompt = f"""CURRENT PATIENT RECORD:
@@ -112,16 +123,18 @@ class HealthWorkerAiService:
 - Current Priority: {patient_data.get('priority', 'normal')} (Urgency Level: {patient_data.get('urgency_level', 'green')})
 - Vitals: BP {patient_data.get('bp_systolic')}/{patient_data.get('bp_diastolic')} mmHg, Temp {patient_data.get('temperature_f')} °F, Weight {patient_data.get('weight_kg')} kg, Height {patient_data.get('height_cm')} cm
 - Chief Complaints: {patient_data.get('chief_complaints', 'None recorded')}
+- Kiosk Interrogation Dialogue History:
+{json.dumps(dialogue_turns, indent=2) if dialogue_turns else "No separate turn list; refer to summary disclosures."}
 - Current AI Summary:
 {json.dumps(patient_data.get('ai_summary') or {}, indent=2)}
 
-HEALTH WORKER INSTRUCTION:
+HEALTH WORKER MESSAGE / QUERY:
 "{worker_message}"
 
 Generate the JSON response matching this schema:
 {{
-  "ai_reply": "<courteous, clear clinical response explaining what was updated and any relevant clinical insight>",
-  "changes_applied": ["<bullet 1: e.g. Updated Blood Pressure to 135/85 mmHg>", "<bullet 2: Added mild dry cough (3 days) to symptoms>"],
+  "ai_reply": "<comprehensive, courteous clinical answer addressing what the patient said, or describing the applied update>",
+  "changes_applied": ["<bullet 1 if changes were made; empty array [] if this was an inquiry / interrogation question>"],
   "updated_fields": {{
     "bp_systolic": <integer or null if unchanged>,
     "bp_diastolic": <integer or null if unchanged>,
@@ -142,13 +155,6 @@ Generate the JSON response matching this schema:
       }}
     ],
     "symptoms_removed": ["<symptom names to remove if requested>"],
-    "candidate_conditions": [
-      {{
-        "condition": "<disease name>",
-        "match_confidence": "High | Moderate | Low",
-        "matching_rationale": "<rationale>"
-      }}
-    ],
     "medications_and_history": {{
       "medications_taken": "<or null>",
       "chronic_conditions": "<or null>",
@@ -170,7 +176,29 @@ Generate the JSON response matching this schema:
         """Resilient rule-based parser if LLM endpoint fails or is unreachable."""
         changes = []
         updated_fields = {}
-        msg_lower = message.lower()
+        msg_lower = message.lower().strip()
+
+        # Check if message is a question or inquiry
+        is_question = (
+            msg_lower.endswith("?")
+            or any(msg_lower.startswith(w) for w in ["what", "did", "when", "is", "are", "does", "can", "how", "tell", "show", "why", "where"])
+        )
+
+        if is_question:
+            # Inquiry response without mutating clinical record
+            chief = patient_data.get("chief_complaints") or "No chief complaint recorded."
+            vitals_str = f"BP: {patient_data.get('bp_systolic', '—')}/{patient_data.get('bp_diastolic', '—')}, Temp: {patient_data.get('temperature_f', '—')} °F"
+            ai_sum = patient_data.get("ai_summary") or {}
+            struct = ai_sum.get("structured_summary") or ai_sum
+            symptoms = struct.get("symptoms_deep_dive") or struct.get("symptoms") or []
+            sym_names = [s.get("name") for s in symptoms if isinstance(s, dict) and s.get("name")]
+
+            reply = f"Regarding {patient_data.get('full_name')}'s interrogation: Presenting complaints: '{chief}'. Active symptoms cataloged: {', '.join(sym_names) if sym_names else 'None'}. Current vitals: {vitals_str}."
+            return {
+                "ai_reply": reply,
+                "changes_applied": [],
+                "updated_fields": {},
+            }
 
         # BP detection (e.g. 130/85 or 130 / 85)
         bp_match = re.search(r"(\d{2,3})\s*/\s*(\d{2,3})", message)
@@ -207,10 +235,94 @@ Generate the JSON response matching this schema:
         changes.append("Appended health worker clinical instruction to notes")
 
         return {
-            "ai_reply": f"Understood. I have recorded your update: '{message}'. The relevant parameters have been updated for physician review.",
+            "ai_reply": f"Understood. Recorded your clinical instruction: '{message}'. Relevant parameters updated for doctor review.",
             "changes_applied": changes if changes else ["Recorded health worker update in clinical notes"],
             "updated_fields": updated_fields,
         }
+
+    async def generate_referral_note(
+        self,
+        patient_data: Dict[str, Any],
+        reason_for_referral: str,
+        possible_diagnosis: str,
+        referring_doctor_name: str,
+        referring_facility_name: str,
+        urgency: str = "Urgent",
+        clinical_notes: Optional[str] = None,
+    ) -> str:
+        """
+        Synthesizes an official, structured Hospital Referral Memorandum using Sarvam AI LLM.
+        """
+        from app.core.prompts import CLINICAL_REFERRAL_NOTE_SYSTEM, build_clinical_referral_note_prompt
+
+        p_name = patient_data.get("full_name") or "Patient"
+        p_id = patient_data.get("patient_id") or "N/A"
+        age = patient_data.get("age", 0)
+        gender = patient_data.get("gender", "Unknown")
+
+        bp_sys = patient_data.get("bp_systolic")
+        bp_dia = patient_data.get("bp_diastolic")
+        temp = patient_data.get("temperature_f")
+        vitals_parts = []
+        if bp_sys and bp_dia:
+            vitals_parts.append(f"BP: {bp_sys}/{bp_dia} mmHg")
+        if temp:
+            vitals_parts.append(f"Temp: {temp}°F")
+        vitals_text = ", ".join(vitals_parts) if vitals_parts else "Vitals recorded at triage"
+
+        chief_complaints = patient_data.get("chief_complaints") or ""
+        ai_sum = patient_data.get("ai_summary") or {}
+        if isinstance(ai_sum, dict):
+            st = ai_sum.get("structured_summary") or ai_sum
+            if isinstance(st, dict) and st.get("clinical_narrative"):
+                chief_complaints = f"{chief_complaints} | Narrative: {st.get('clinical_narrative')}"
+
+        user_prompt = build_clinical_referral_note_prompt(
+            patient_name=p_name,
+            patient_id=p_id,
+            age=age,
+            gender=gender,
+            vitals_text=vitals_text,
+            chief_complaints=chief_complaints,
+            reason_for_referral=reason_for_referral,
+            possible_diagnosis=possible_diagnosis,
+            referring_doctor_name=referring_doctor_name,
+            referring_facility_name=referring_facility_name,
+            urgency=urgency,
+            clinical_notes=clinical_notes,
+        )
+
+        try:
+            note = await self._call_llm(CLINICAL_REFERRAL_NOTE_SYSTEM, user_prompt)
+            if note and len(note.strip()) > 40:
+                return note.strip()
+        except Exception as e:
+            print(f"[HealthWorkerAiService] Error generating referral note: {e}")
+
+        # Deterministic fallback
+        now_str = datetime.utcnow().strftime("%d %B %Y, %H:%M UTC")
+        return (
+            f"OFFICIAL CLINICAL REFERRAL & TRANSFER MEMORANDUM\n"
+            f"----------------------------------------------------\n"
+            f"Date / Time: {now_str}\n"
+            f"Referring Facility: {referring_facility_name}\n"
+            f"Referring Physician: Dr. {referring_doctor_name}\n"
+            f"Transfer Priority / Urgency: {urgency.upper()}\n\n"
+            f"1. PATIENT IDENTIFICATION & CLINICAL STATUS:\n"
+            f"• Patient: {p_name} (ID: {p_id})\n"
+            f"• Age / Gender: {age} yrs / {gender}\n"
+            f"• Baseline Vitals: {vitals_text}\n\n"
+            f"2. WORKING / PROVISIONAL DIAGNOSIS:\n"
+            f"• {possible_diagnosis}\n\n"
+            f"3. REASON & JUSTIFICATION FOR EXTERNAL TRANSFER:\n"
+            f"• {reason_for_referral}\n\n"
+            f"4. PRESENTING SYMPTOMS & CLINICAL FINDINGS:\n"
+            f"• {chief_complaints or 'Reported acute medical symptoms requiring advanced evaluation.'}\n\n"
+            f"5. PRE-TRANSFER BEDSIDE STABILIZATION & NOTES:\n"
+            f"• {clinical_notes or 'Supportive clinical care initiated. Vital parameters monitored.'}\n\n"
+            f"6. RECOMMENDED TRANSPORT & ESCORT PROTOCOL:\n"
+            f"• Patient requires transfer under continuous observation with medical escort to designated higher-level facility."
+        )
 
 
 health_worker_ai = HealthWorkerAiService()

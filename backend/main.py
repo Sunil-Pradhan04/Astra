@@ -25,6 +25,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         import logging
         logging.getLogger("astra").error(f"Failed to initialize urgency detector during startup: {e}")
+
+    # Bootstrap Pinecone 'astra-conversation' index for existing patients in background
+    try:
+        from app.services.conversation_rag_service import conversation_rag
+        asyncio.create_task(conversation_rag.bootstrap_existing_patients())
+    except Exception as e:
+        import logging
+        logging.getLogger("astra").warning(f"Could not trigger conversation RAG bootstrap: {e}")
     try:
         yield
     except (asyncio.CancelledError, KeyboardInterrupt):

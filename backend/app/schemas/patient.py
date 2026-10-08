@@ -54,6 +54,8 @@ class PatientOut(BaseModel):
     assigned_doctor_name: Optional[str] = None
     assigned_doctor_role: Optional[str] = None
     doctor_prescription: Optional[Dict[str, Any]] = None
+    internal_referral: Optional[Dict[str, Any]] = None
+    external_referral: Optional[Dict[str, Any]] = None
 
 
 class PatientManualUpdateRequest(BaseModel):
@@ -115,4 +117,38 @@ class AiUpdateResponse(BaseModel):
     ai_reply: str
     changes_applied: List[str]
     patient: PatientOut
+
+
+# ── Clinical Referral Schemas ───────────────────────────────────────────────
+
+class InternalReferralRequest(BaseModel):
+    target_doctor_id: str
+    reason: str
+    notes: Optional[str] = None
+    priority: Optional[str] = None
+
+
+class GenerateReferralNoteRequest(BaseModel):
+    reason_for_referral: str
+    possible_diagnosis: str
+    urgency: Optional[str] = "Urgent"
+    clinical_notes: Optional[str] = None
+
+
+class ExternalReferralDoctorRequest(BaseModel):
+    reason_for_referral: str
+    possible_diagnosis: str
+    urgency: str = "Urgent"
+    ai_referral_note: str
+    clinical_notes: Optional[str] = None
+
+
+class ExternalReferralDispatchWorkerRequest(BaseModel):
+    target_care_hub_id: str
+    target_care_hub_name: str
+    target_care_hub_type: Optional[str] = None
+    target_care_hub_distance_km: Optional[float] = None
+    updated_referral_note: str
+    worker_id: Optional[str] = None
+    worker_name: Optional[str] = None
 

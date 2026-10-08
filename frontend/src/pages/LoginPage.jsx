@@ -162,12 +162,12 @@ const ROLE_CONFIG = {
     tagline: 'Access patient consultations, prescriptions and medical case histories.',
     pills: ['Patient Cases', 'Prescriptions'],
     hint: {
-      title: 'Doctor Login',
-      text: 'Use your hospital-assigned Doctor ID and password to sign in.',
+      title: 'Demo Doctor Credentials',
+      text: 'Doctor ID: DOC-47617 | Password: doctor123. Or click Quick Demo Fill below.',
     },
     fields: {
       login: [
-        { name: 'doctorId', label: 'Doctor ID', type: 'text',     icon: 'id',   placeholder: 'e.g. DOC-00456' },
+        { name: 'doctorId', label: 'Doctor ID', type: 'text',     icon: 'id',   placeholder: 'e.g. DOC-47617' },
         { name: 'password', label: 'Password',  type: 'password', icon: 'lock', placeholder: 'Your password' },
       ],
     },
@@ -180,12 +180,12 @@ const ROLE_CONFIG = {
     tagline: 'Role-dedicated workstation: Reception Desk, AI Verification, or Dispensing.',
     pills: ['Reception Intake', 'AI Verification', 'Medication Dispensing'],
     hint: {
-      title: 'Role-Based Authentication',
-      text: 'Enter your assigned Worker ID (REC-, VER-, or DIS-) and password. Your role workspace will be assigned automatically upon sign in.',
+      title: 'Demo Health Worker Credentials',
+      text: 'Reception: REC-29073 (qi4lmPvh2m) · Verification: VER-67091 (pH@8pgh6BO)',
     },
     fields: {
       login: [
-        { name: 'workerId', label: 'Worker ID', type: 'text',     icon: 'id',   placeholder: 'e.g. REC-00001 / VER-00001 / DIS-00001' },
+        { name: 'workerId', label: 'Worker ID', type: 'text',     icon: 'id',   placeholder: 'e.g. REC-29073 or VER-67091' },
         { name: 'password', label: 'Password',  type: 'password', icon: 'lock', placeholder: 'Your password' },
       ],
     },
@@ -198,12 +198,12 @@ const ROLE_CONFIG = {
     tagline: 'Patient interaction terminal. Connect to your assigned facility.',
     pills: ['Device Portal'],
     hint: {
-      title: 'Device Login',
-      text: 'Use your assigned Device ID and password to connect.',
+      title: 'Demo Device Credentials',
+      text: 'Device ID: DEV-05602 | Password: prGI8qJkv5. Or click Quick Demo Fill below.',
     },
     fields: {
       login: [
-        { name: 'deviceId', label: 'Device ID', type: 'text',     icon: 'id',   placeholder: 'e.g. DEV-00001' },
+        { name: 'deviceId', label: 'Device ID', type: 'text',     icon: 'id',   placeholder: 'e.g. DEV-05602' },
         { name: 'password', label: 'Password',  type: 'password', icon: 'lock', placeholder: 'Device password' },
       ],
     },
@@ -449,6 +449,100 @@ export default function LoginPage() {
               {loading ? 'Authenticating...' : (activeTab === 'register' ? 'Create Account' : 'Sign In')}
               <IconSubmit />
             </button>
+
+            {/* Quick Demo Fill Buttons */}
+            {role === 'doctor' && (
+              <div style={{ marginTop: 12, textAlign: 'center' }}>
+                <button
+                  type="button"
+                  onClick={() => setFormData({ doctorId: 'DOC-47617', password: 'doctor123' })}
+                  style={{
+                    background: 'rgba(56, 189, 248, 0.1)',
+                    border: '1px solid #38bdf8',
+                    color: '#0284c7',
+                    padding: '7px 14px',
+                    borderRadius: 6,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  ⚡ Demo Doctor: Dr. Mahesh (DOC-47617)
+                </button>
+              </div>
+            )}
+
+            {role === 'health-worker' && (
+              <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => setFormData({ workerId: 'REC-29073', password: 'qi4lmPvh2m' })}
+                  style={{
+                    background: 'rgba(16, 185, 129, 0.1)',
+                    border: '1px solid #10b981',
+                    color: '#059669',
+                    padding: '7px 14px',
+                    borderRadius: 6,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                  }}
+                >
+                  ⚡ Demo Reception Desk (REC-29073)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFormData({ workerId: 'VER-67091', password: 'pH@8pgh6BO' })}
+                  style={{
+                    background: 'rgba(59, 130, 246, 0.1)',
+                    border: '1px solid #3b82f6',
+                    color: '#2563eb',
+                    padding: '7px 14px',
+                    borderRadius: 6,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                  }}
+                >
+                  ⚡ Demo Verification Desk (VER-67091)
+                </button>
+              </div>
+            )}
+
+            {role === 'endpoint-device' && (
+              <div style={{ marginTop: 12, textAlign: 'center' }}>
+                <button
+                  type="button"
+                  onClick={() => setFormData({ deviceId: 'DEV-05602', password: 'prGI8qJkv5' })}
+                  style={{
+                    background: 'rgba(147, 51, 234, 0.1)',
+                    border: '1px solid #a855f7',
+                    color: '#9333ea',
+                    padding: '7px 14px',
+                    borderRadius: 6,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  ⚡ Demo AI Kiosk Terminal (DEV-05602)
+                </button>
+              </div>
+            )}
           </form>
 
           {/* Role hint */}

@@ -55,6 +55,10 @@ class Patient(Document):
     # Doctor Prescription & Digital Treatment Record
     doctor_prescription: Optional[Dict[str, Any]] = None
 
+    # Clinical Referrals (Inside Hospital / Hospital to Another)
+    internal_referral: Optional[Dict[str, Any]] = None
+    external_referral: Optional[Dict[str, Any]] = None
+
     class Settings:
         name = "patients"
         indexes = [

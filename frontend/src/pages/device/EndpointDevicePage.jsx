@@ -41,9 +41,11 @@ import {
   startKioskSession,
   replyText,
   replyAudio,
+  skipPrescription,
   deviceHeartbeat,
   deviceLogout,
   updatePatientVitals,
+  getSessionMemory,
 } from '../../api/deviceApi'
 import PrescriptionCameraModal from '../../components/device/PrescriptionCameraModal'
 
@@ -174,9 +176,12 @@ export default function EndpointDevicePage() {
   const [isProcessing, setIsProcessing] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
 
-  // Modals for Transcript History & Question Checklist
+  // Modals for Transcript History, Question Checklist & Temporary Clinical Memory
   const [showTranscriptModal, setShowTranscriptModal] = useState(false)
   const [showQuestionsModal, setShowQuestionsModal] = useState(false)
+  const [showMemoryModal, setShowMemoryModal] = useState(false)
+  const [temporaryClinicalMemory, setTemporaryClinicalMemory] = useState(null)
+  const [isLoadingMemory, setIsLoadingMemory] = useState(false)
 
   // Micro-Pipeline Progress Tracking
   // 'idle' | 'answering' | 'stt' | 'regex_urgency' | 'nlp_urgency' | 'memory_saved'
@@ -297,6 +302,7 @@ export default function EndpointDevicePage() {
       setCurrentAudioBase64(data.audio_base64)
       setCurrentPhase(data.phase || 'phase_1')
       setQuestionsMemory(data.questions_status || [])
+      setTemporaryClinicalMemory(data.temporary_clinical_memory || null)
 
       setConversationHistory([
         {
@@ -395,13 +401,22 @@ export default function EndpointDevicePage() {
   const mentionsReportOrPrescription = (text) => {
     if (!text) return false
     const t = text.toLowerCase()
+    const negativeWords = [
+      'no', 'not', 'nahi', 'nahin', 'nhi', "don't", 'dont', 'do not', 'without',
+      'nothing', 'none', 'kuch nahi', 'kichhi nahi', 'नाही', 'ନାହିଁ', 'नहीं'
+    ]
+    const hasNegation = negativeWords.some((nw) => {
+      const reg = new RegExp(`\\b${nw}\\b`, 'i')
+      return reg.test(t) || t.includes(nw)
+    })
+    if (hasNegation) return false
+
     return (
-      t.includes('report') ||
-      t.includes('prescription') ||
-      t.includes('parcha') ||
-      t.includes('parchi') ||
-      t.includes('pacha') ||
-      t.includes('medical note') ||
+      t.includes('have report') ||
+      t.includes('have prescription') ||
+      t.includes('parcha hai') ||
+      t.includes('report hai') ||
+      t.includes('show report') ||
       t.includes('doctor note') ||
       t.includes('doctor slip') ||
       t.includes('test result') ||
@@ -409,11 +424,12 @@ export default function EndpointDevicePage() {
       t.includes('xray') ||
       t.includes('x-ray') ||
       t.includes('discharge') ||
-      t.includes('पर्चा') ||
-      t.includes('रिपोर्ट') ||
-      t.includes('कागज़') ||
-      t.includes('ପ୍ରେସକ୍ରିପସନ') ||
-      t.includes('ରିପୋର୍ଟ')
+      t.includes('पर्चा है') ||
+      t.includes('रिपोर्ट है') ||
+      t.includes('ପ୍ରେସକ୍ରିପସନ ଅଛି') ||
+      t.includes('ରିପୋର୍ଟ ଅଛି') ||
+      ((t.includes('report') || t.includes('prescription') || t.includes('parcha')) &&
+       (t.includes('yes') || t.includes('yeah') || t.includes('haan') || t.includes('ha') || t.includes('show') || t.includes('here') || t.trim().split(/\s+/).length <= 2))
     )
   }
 
@@ -457,8 +473,50 @@ export default function EndpointDevicePage() {
     }
   }
 
-  const handleSendText = async () => {
-    const reply = textAnswer.trim()
+  const handleSkipPrescription = async () => {
+    if (isProcessing) return
+    setIsProcessing(true)
+    setErrorMsg('')
+    runMicroPipelineVisuals()
+    setIsPrescriptionPromptActive(false)
+    setShowCameraModal(false)
+
+    setConversationHistory((prev) => [
+      ...prev,
+      {
+        role: 'patient',
+        text: 'No (No prescription / report)',
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      },
+    ])
+
+    try {
+      const fd = new FormData()
+      fd.append('session_id', sessionId)
+      fd.append('patient_id', activePatientId)
+      const res = await skipPrescription(fd)
+      handleProcessReplyResponse(res.data)
+    } catch (err) {
+      console.warn('skipPrescription API failed, falling back to replyText:', err)
+      try {
+        const res2 = await replyText({
+          session_id: sessionId,
+          patient_id: activePatientId,
+          answer_text: 'No, I do not have any prescription or test report',
+          tts_engine: ttsEngine,
+        })
+        handleProcessReplyResponse(res2.data)
+      } catch (err2) {
+        setErrorMsg(err2.response?.data?.detail || 'Failed to proceed. Please retry.')
+        setMicroStep('idle')
+      }
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+
+  const handleSendText = async (explicitText = null) => {
+    const reply = (typeof explicitText === 'string' ? explicitText : textAnswer).trim()
     if (!reply || isProcessing) return
 
     setTextAnswer('')
@@ -495,6 +553,24 @@ export default function EndpointDevicePage() {
       setIsProcessing(false)
     }
   }
+ 
+  // ── Fetch Active Temporary Clinical Memory Data ───────────────────────
+  const handleFetchTemporaryMemory = async () => {
+    if (!sessionId) return
+    setIsLoadingMemory(true)
+    try {
+      const res = await getSessionMemory(sessionId)
+      if (res.data) {
+        if (res.data.temporary_clinical_memory) {
+          setTemporaryClinicalMemory(res.data.temporary_clinical_memory)
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to fetch temporary clinical memory:', err)
+    } finally {
+      setIsLoadingMemory(false)
+    }
+  }
 
   // ── Handle AI Response Turn ───────────────────────────────────────────
   const handleProcessReplyResponse = (data) => {
@@ -503,6 +579,9 @@ export default function EndpointDevicePage() {
 
     if (data.questions_status) {
       setQuestionsMemory(data.questions_status)
+    }
+    if (data.temporary_clinical_memory) {
+      setTemporaryClinicalMemory(data.temporary_clinical_memory)
     }
     if (data.phase) {
       setCurrentPhase(data.phase)
@@ -659,31 +738,52 @@ export default function EndpointDevicePage() {
       if (stepIndex === 6) return 'active'
       return 'pending'
     }
-    // During interrogation
-    const askedCount = questionsMemory.filter((q) => q.flag === 'asked').length
 
+    // Step 1: Initial Symptoms Disclosure (Phase 1)
     if (stepIndex === 1) {
       return currentPhase === 'phase_1' ? 'active' : 'completed'
     }
+
+    // Step 2: Clinical Gap Analysis (LLM rule extraction)
     if (stepIndex === 2) {
       if (currentPhase === 'phase_1') return 'pending'
-      return currentPhase === 'phase_2' ? 'active' : 'completed'
+      return 'completed'
     }
+
+    // Step 3: Rule-Based Detail Gaps (Duration, Place, Depth)
     if (stepIndex === 3) {
-      if (['phase_1'].includes(currentPhase)) return 'pending'
-      return currentPhase === 'phase_2' ? 'active' : 'completed'
+      if (currentPhase === 'phase_1') return 'pending'
+      if (currentPhase === 'phase_2') {
+        const total = temporaryClinicalMemory?.total_gaps || 1
+        const curr = temporaryClinicalMemory?.current_gap_index || 0
+        return curr >= total ? 'completed' : 'active'
+      }
+      return 'completed'
     }
+
+    // Step 4: Memory Plan Execution & Detail Verification
     if (stepIndex === 4) {
-      if (['phase_1', 'phase_2'].includes(currentPhase)) return 'pending'
-      return currentPhase === 'phase_3' ? 'active' : 'completed'
+      if (['phase_1'].includes(currentPhase)) return 'pending'
+      if (currentPhase === 'phase_2') {
+        const total = temporaryClinicalMemory?.total_gaps || 1
+        const curr = temporaryClinicalMemory?.current_gap_index || 0
+        return curr >= total ? 'completed' : 'active'
+      }
+      return 'completed'
     }
+
+    // Step 5: Prescription / OCR Check
     if (stepIndex === 5) {
-      if (isPrescriptionPromptActive || showCameraModal) return 'active'
+      if (isPrescriptionPromptActive || showCameraModal || currentPhase === 'phase_prescription_prompt' || currentPhase === 'phase_prescription_camera') return 'active'
       return ['completed', 'waiting_worker_input'].includes(stage) ? 'completed' : 'pending'
     }
+
+    // Step 6: Health Worker Vitals (10s)
     if (stepIndex === 6) {
       return stage === 'waiting_worker_input' ? 'active' : 'pending'
     }
+
+    // Step 7: Route to Doctor Queue
     if (stepIndex === 7) {
       return stage === 'completed' ? 'completed' : 'pending'
     }
@@ -948,8 +1048,8 @@ export default function EndpointDevicePage() {
                 </div>
               </div>
 
-              {/* Discreet Modals Access (Transcript & Checklist) */}
-              <div style={{ display: 'flex', gap: 8 }}>
+              {/* Discreet Modals Access (Transcript, Checklist & Temporary Memory Data) */}
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 <button
                   type="button"
                   onClick={() => setShowTranscriptModal(true)}
@@ -957,7 +1057,7 @@ export default function EndpointDevicePage() {
                   style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '6px 12px', background: '#f8fafc', border: '1px solid #cbd5e1' }}
                 >
                   <FileText size={13} />
-                  <span>Transcript History ({conversationHistory.length})</span>
+                  <span>Transcript ({conversationHistory.length})</span>
                 </button>
 
                 <button
@@ -967,7 +1067,35 @@ export default function EndpointDevicePage() {
                   style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '6px 12px', background: '#f8fafc', border: '1px solid #cbd5e1' }}
                 >
                   <ListOrdered size={13} />
-                  <span>Question Checklist</span>
+                  <span>Checklist</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowMemoryModal(true)
+                    handleFetchTemporaryMemory()
+                  }}
+                  className="hw-tab-pill"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '6px 12px',
+                    background: temporaryClinicalMemory ? '#eff6ff' : '#f8fafc',
+                    borderColor: temporaryClinicalMemory ? '#93c5fd' : '#cbd5e1',
+                    color: temporaryClinicalMemory ? '#1d4ed8' : '#334155',
+                    fontWeight: 600,
+                  }}
+                  title="View Active Rule-Based Temporary Memory Data"
+                >
+                  <Database size={13} className={temporaryClinicalMemory ? 'text-blue-600' : ''} />
+                  <span>
+                    Temporary Memory
+                    {temporaryClinicalMemory?.gap_plan
+                      ? ` (${temporaryClinicalMemory.current_gap_index || 0}/${temporaryClinicalMemory.total_gaps || temporaryClinicalMemory.gap_plan.length})`
+                      : ''}
+                  </span>
                 </button>
               </div>
             </div>
@@ -1059,24 +1187,25 @@ export default function EndpointDevicePage() {
               {/* ── Prescription Prompt Quick Confirmation (if active) ── */}
               {isPrescriptionPromptActive && (
                 <div style={{ width: '100%', marginBottom: 20 }}>
-                  <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+                  <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
                     <button
                       type="button"
                       onClick={() => setShowCameraModal(true)}
                       className="rx-btn-accept-yes"
-                      style={{ padding: '12px 24px' }}
+                      style={{ padding: '12px 24px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}
                     >
                       <Camera size={18} />
                       <span>Yes, Open Camera &amp; Scan Report</span>
                     </button>
                     <button
                       type="button"
-                      onClick={() => handleSendText()}
+                      onClick={handleSkipPrescription}
+                      disabled={isProcessing}
                       className="rx-btn-accept-no"
-                      style={{ padding: '12px 20px' }}
+                      style={{ padding: '12px 20px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}
                     >
                       <XCircle size={18} />
-                      <span>No Prescription, Continue</span>
+                      <span>No, Continue (नहीं / ନାହିଁ)</span>
                     </button>
                   </div>
                 </div>
@@ -1225,7 +1354,32 @@ export default function EndpointDevicePage() {
                   <Layers size={14} className="text-blue-600" />
                   <span>Clinical Interrogation &amp; Triage Pipeline</span>
                 </div>
-                <span>Phase Progress (Turns Green on Completion)</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowMemoryModal(true)
+                      handleFetchTemporaryMemory()
+                    }}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      fontSize: 11.5,
+                      fontWeight: 600,
+                      color: '#1d4ed8',
+                      background: '#eff6ff',
+                      border: '1px solid #bfdbfe',
+                      borderRadius: 6,
+                      padding: '3px 9px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <Database size={12} />
+                    <span>View Temporary Memory Data</span>
+                  </button>
+                  <span>Phase Progress (Turns Green on Completion)</span>
+                </div>
               </div>
 
               <div className="terminal-stepper-boxes-row">
@@ -1242,7 +1396,7 @@ export default function EndpointDevicePage() {
                   <span className="terminal-step-box-num">
                     {getMacroStepStatus(2) === 'completed' ? '✓' : '2'}
                   </span>
-                  <span className="terminal-step-box-title">Vector DB Retrieval</span>
+                  <span className="terminal-step-box-title">Clinical Gap Analysis</span>
                 </div>
 
                 {/* 3 */}
@@ -1250,7 +1404,7 @@ export default function EndpointDevicePage() {
                   <span className="terminal-step-box-num">
                     {getMacroStepStatus(3) === 'completed' ? '✓' : '3'}
                   </span>
-                  <span className="terminal-step-box-title">Differential Questions (Phase 2)</span>
+                  <span className="terminal-step-box-title">Rule-Based Detail Gaps</span>
                 </div>
 
                 {/* 4 */}
@@ -1258,7 +1412,7 @@ export default function EndpointDevicePage() {
                   <span className="terminal-step-box-num">
                     {getMacroStepStatus(4) === 'completed' ? '✓' : '4'}
                   </span>
-                  <span className="terminal-step-box-title">Clinical Deep-Dive (Phase 3)</span>
+                  <span className="terminal-step-box-title">Memory Plan Execution</span>
                 </div>
 
                 {/* 5 */}
@@ -1590,6 +1744,284 @@ export default function EndpointDevicePage() {
         </div>
       )}
 
+      {/* ── MODAL 3: Temporary Clinical Memory Data ── */}
+      {showMemoryModal && (
+        <div className="terminal-modal-overlay fade-in">
+          <div className="terminal-modal-card" style={{ maxWidth: 740, maxHeight: '85vh' }}>
+            <div className="terminal-modal-header" style={{ background: '#f8fafc' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ width: 32, height: 32, borderRadius: 8, background: '#dbeafe', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Database size={17} className="text-blue-600" />
+                </div>
+                <div>
+                  <h3 style={{ fontSize: 15, fontWeight: 700, margin: 0, color: '#0f172a' }}>
+                    Active Temporary Clinical Memory Data
+                  </h3>
+                  <div style={{ fontSize: 11, color: '#64748b', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span>Patient Token: <strong>{activePatientId || 'Active'}</strong></span>
+                    <span>•</span>
+                    <span style={{ color: '#0369a1', fontWeight: 600 }}>Rule-Based Detail Gap Engine (No RAG)</span>
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={handleFetchTemporaryMemory}
+                  disabled={isLoadingMemory}
+                  title="Refresh Memory Data from Server"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    padding: '5px 10px',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: '#2563eb',
+                    background: '#eff6ff',
+                    border: '1px solid #bfdbfe',
+                    borderRadius: 6,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <RefreshCw size={13} className={isLoadingMemory ? 'animate-spin' : ''} />
+                  <span>Sync</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowMemoryModal(false)}
+                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#64748b' }}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            <div className="terminal-modal-body" style={{ gap: 14 }}>
+              {!temporaryClinicalMemory ? (
+                <div style={{ textAlign: 'center', padding: '36px 20px', color: '#64748b' }}>
+                  <Database size={38} style={{ margin: '0 auto 12px', opacity: 0.35, color: '#3b82f6' }} />
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a', marginBottom: 6 }}>
+                    Temporary Memory Initializing
+                  </div>
+                  <p style={{ fontSize: 12.5, lineHeight: 1.5, margin: 0, maxWidth: 480, marginInline: 'auto' }}>
+                    Temporary memory is instantiated immediately after the patient answers the first two presenting symptom questions (Phase 1). The LLM analyzes clinical gaps across duration, place, and depth, storing the targeted follow-up plan here.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleFetchTemporaryMemory}
+                    disabled={isLoadingMemory}
+                    style={{
+                      marginTop: 16,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '7px 16px',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      background: '#2563eb',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: 6,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <RefreshCw size={13} className={isLoadingMemory ? 'animate-spin' : ''} />
+                    <span>Check Live Server Memory</span>
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {/* Summary Bar */}
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+                      gap: 10,
+                    }}
+                  >
+                    <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '10px 12px' }}>
+                      <div style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}>SYMPTOMS LOGGED</div>
+                      <div style={{ fontSize: 18, fontWeight: 800, color: '#0f172a' }}>
+                        {temporaryClinicalMemory.symptoms_identified?.length || 0}
+                      </div>
+                    </div>
+                    <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '10px 12px' }}>
+                      <div style={{ fontSize: 11, color: '#1e40af', fontWeight: 600 }}>GAP QUESTIONS</div>
+                      <div style={{ fontSize: 18, fontWeight: 800, color: '#1d4ed8' }}>
+                        {temporaryClinicalMemory.total_gaps || temporaryClinicalMemory.gap_plan?.length || 0}
+                      </div>
+                    </div>
+                    <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: '10px 12px' }}>
+                      <div style={{ fontSize: 11, color: '#166534', fontWeight: 600 }}>GAPS ADDRESSED</div>
+                      <div style={{ fontSize: 18, fontWeight: 800, color: '#15803d' }}>
+                        {temporaryClinicalMemory.current_gap_index || 0} / {temporaryClinicalMemory.total_gaps || temporaryClinicalMemory.gap_plan?.length || 0}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 1. Presenting Symptoms */}
+                  <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: '12px 14px' }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#334155', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+                      Identified Presenting Symptoms (Phase 1 Extraction)
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {Array.isArray(temporaryClinicalMemory.symptoms_identified) && temporaryClinicalMemory.symptoms_identified.length > 0 ? (
+                        temporaryClinicalMemory.symptoms_identified.map((sym, sIdx) => (
+                          <span
+                            key={sIdx}
+                            style={{
+                              padding: '4px 10px',
+                              background: '#e0f2fe',
+                              color: '#0369a1',
+                              border: '1px solid #bae6fd',
+                              borderRadius: 6,
+                              fontSize: 12,
+                              fontWeight: 600,
+                            }}
+                          >
+                            ✓ {sym}
+                          </span>
+                        ))
+                      ) : (
+                        <span style={{ fontSize: 12, color: '#64748b' }}>None identified yet</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 2. Already Stated Details */}
+                  {temporaryClinicalMemory.already_stated_details && (
+                    <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: '12px 14px' }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: '#334155', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+                        Already Disclosed Clinical Details
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 8 }}>
+                        {Object.entries(temporaryClinicalMemory.already_stated_details).map(([k, v], kIdx) => (
+                          <div
+                            key={kIdx}
+                            style={{
+                              background: '#fff',
+                              border: '1px solid #e2e8f0',
+                              borderRadius: 6,
+                              padding: '6px 10px',
+                              fontSize: 12,
+                            }}
+                          >
+                            <span style={{ fontWeight: 700, color: '#475569', textTransform: 'capitalize' }}>
+                              {k.replace(/_/g, ' ')}:
+                            </span>{' '}
+                            <span style={{ color: '#0f172a' }}>{v || 'Not mentioned'}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 3. Rule-Based Detail Gap Plan */}
+                  <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: 10, padding: '12px 14px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: '#334155', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                        Rule-Based Clinical Gap Plan &amp; Live Tracking
+                      </div>
+                      <span style={{ fontSize: 11, color: '#64748b' }}>
+                        Memory-Driven Interrogation
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {Array.isArray(temporaryClinicalMemory.gap_plan) && temporaryClinicalMemory.gap_plan.length > 0 ? (
+                        temporaryClinicalMemory.gap_plan.map((gap, gIdx) => {
+                          const isAnswered = gap.status === 'answered' || !!gap.patient_answer_en
+                          return (
+                            <div
+                              key={gIdx}
+                              style={{
+                                border: `1px solid ${isAnswered ? '#86efac' : '#cbd5e1'}`,
+                                background: isAnswered ? '#f0fdf4' : '#f8fafc',
+                                borderRadius: 8,
+                                padding: '10px 12px',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: 6,
+                              }}
+                            >
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                  <span style={{ fontWeight: 800, color: '#0f172a', fontSize: 12 }}>
+                                    Gap #{gIdx + 1}
+                                  </span>
+                                  <span
+                                    style={{
+                                      fontSize: 10.5,
+                                      fontWeight: 700,
+                                      padding: '2px 7px',
+                                      borderRadius: 4,
+                                      background: '#e0e7ff',
+                                      color: '#3730a3',
+                                      textTransform: 'uppercase',
+                                    }}
+                                  >
+                                    {gap.gap_type || 'Detail'}
+                                  </span>
+                                  {gap.target_symptom && (
+                                    <span style={{ fontSize: 11, color: '#64748b' }}>
+                                      Target: <strong>{gap.target_symptom}</strong>
+                                    </span>
+                                  )}
+                                </div>
+                                <span
+                                  style={{
+                                    fontSize: 10.5,
+                                    fontWeight: 800,
+                                    padding: '2px 8px',
+                                    borderRadius: 4,
+                                    background: isAnswered ? '#16a34a' : '#f59e0b',
+                                    color: '#fff',
+                                  }}
+                                >
+                                  {isAnswered ? 'ANSWERED ✓' : 'PENDING ⏳'}
+                                </span>
+                              </div>
+
+                              <div style={{ fontSize: 12.5, color: '#1e293b', fontWeight: 600 }}>
+                                {gap.question_text || gap.question_text_en}
+                              </div>
+                              {gap.question_text_en && gap.question_text && gap.question_text_en !== gap.question_text && (
+                                <div style={{ fontSize: 11.5, color: '#64748b', fontStyle: 'italic' }}>
+                                  EN: {gap.question_text_en}
+                                </div>
+                              )}
+
+                              {isAnswered && (
+                                <div
+                                  style={{
+                                    marginTop: 4,
+                                    padding: '6px 10px',
+                                    background: '#dcfce7',
+                                    border: '1px solid #bbf7d0',
+                                    borderRadius: 6,
+                                    fontSize: 12,
+                                    color: '#14532d',
+                                  }}
+                                >
+                                  <strong>Recorded Answer:</strong> {gap.patient_answer_en || 'Answer saved'}
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })
+                      ) : (
+                        <div style={{ fontSize: 12, color: '#64748b' }}>No clinical gap questions scheduled.</div>
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Prescription Camera Modal ── */}
       {showCameraModal && (
         <PrescriptionCameraModal
@@ -1606,6 +2038,8 @@ export default function EndpointDevicePage() {
             setShowCameraModal(false)
             if (skipData) {
               handleProcessReplyResponse(skipData)
+            } else {
+              handleSkipPrescription()
             }
           }}
           onClose={() => setShowCameraModal(false)}

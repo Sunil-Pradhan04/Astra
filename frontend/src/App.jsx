@@ -5,10 +5,12 @@ import CarePointPage from './pages/admin/CarePointPage'
 import HubDashboard from './pages/admin/HubDashboard'
 import ProtectedAdminRoute from './components/admin/ProtectedAdminRoute'
 import ProtectedWorkerRoute from './components/worker/ProtectedWorkerRoute'
+import ProtectedDoctorRoute from './components/doctor/ProtectedDoctorRoute'
 import ReceptionPage from './pages/worker/ReceptionPage'
 import VerificationPage from './pages/worker/VerificationPage'
 import DispensingPage from './pages/worker/DispensingPage'
 import EndpointDevicePage from './pages/device/EndpointDevicePage'
+import DoctorDeskPage from './pages/doctor/DoctorDeskPage'
 
 function App() {
   return (
@@ -20,6 +22,12 @@ function App() {
       {/* Endpoint Device Kiosk (Autonomous AI Terminal) */}
       <Route path="/device/terminal" element={<EndpointDevicePage />} />
       <Route path="/endpoint-device" element={<EndpointDevicePage />} />
+
+      {/* Protected Doctor Desk */}
+      <Route element={<ProtectedDoctorRoute />}>
+        <Route path="/doctor/desk" element={<DoctorDeskPage />} />
+        <Route path="/doctor" element={<Navigate to="/doctor/desk" replace />} />
+      </Route>
 
       {/* Protected Admin */}
       <Route element={<ProtectedAdminRoute />}>

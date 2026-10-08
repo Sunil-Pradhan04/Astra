@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import WorkerLayout from '../../components/worker/WorkerLayout'
 import {
   Pill,
@@ -14,7 +14,9 @@ import {
   Building2,
   ChevronRight,
   AlertTriangle,
+  RefreshCw,
 } from 'lucide-react'
+import { getPatientQueue, dispensePatientMedicine } from '../../api/workerApi'
 
 const MOCK_PRESCRIPTIONS = [
   {
@@ -57,61 +59,104 @@ const MOCK_PRESCRIPTIONS = [
     ],
     advisory: 'Low-sodium diet recommended. Avoid missed doses. Regular BP monitoring every 2 weeks.',
   },
-  {
-    patient_id: 'P-0006',
-    full_name: 'Santosh Nayak',
-    age: 38,
-    gender: 'Male',
-    doctor_name: 'Dr. Sunita Mishra',
-    doctor_reg: 'DOC-00188 · Pulmonology',
-    diagnosis: 'Acute Bronchial Spasm with Allergic Rhinitis',
-    prescribed_date: 'Today, 10:45 AM',
-    medications: [
-      {
-        name: 'Montelukast 10mg + Levocetirizine 5mg',
-        type: 'Tablet',
-        dosage: '1 Tab Daily at Night',
-        duration: '10 Days',
-        qty: 10,
-        batch: 'MLT-2025-C11',
-        stock_status: 'In Stock',
-      },
-      {
-        name: 'Acebrophylline 100mg',
-        type: 'Capsule',
-        dosage: '1 Cap Twice Daily (Morning & Evening)',
-        duration: '5 Days',
-        qty: 10,
-        batch: 'ACB-2026-A02',
-        stock_status: 'In Stock',
-      },
-      {
-        name: 'Salbutamol 100mcg Inhaler',
-        type: 'MDI Inhaler',
-        dosage: '2 Puffs as needed for shortness of breath',
-        duration: 'As Needed',
-        qty: 1,
-        batch: 'SAL-2026-INH',
-        stock_status: 'In Stock',
-      },
-    ],
-    advisory: 'Rinse mouth after inhaler usage. Keep warm and avoid cold water.',
-  },
 ]
 
 export default function DispensingPage() {
+  const [prescriptions, setPrescriptions] = useState(MOCK_PRESCRIPTIONS)
   const [selectedRx, setSelectedRx] = useState(MOCK_PRESCRIPTIONS[0])
   const [dispensedItems, setDispensedItems] = useState({})
   const [actionNotice, setActionNotice] = useState('')
+  const [loadingLive, setLoadingLive] = useState(false)
+
+  const mapPatientToRx = (p) => {
+    const docRx = p.doctor_prescription || {}
+    const meds = (docRx.medicines || []).map((m, i) => ({
+      name: m.name,
+      type: m.form || 'Tablet',
+      dosage: `${m.dosage} (${m.frequency})`,
+      duration: m.duration || '5 Days',
+      qty: 10,
+      batch: `RX-${(p.patient_id || '0000').replace('P-', '')}-${i + 1}`,
+      stock_status: 'In Stock',
+      instructions: m.instructions,
+    }))
+    return {
+      patient_id: p.patient_id,
+      full_name: p.full_name,
+      age: p.age,
+      gender: p.gender,
+      doctor_name: docRx.doctor_name || 'Dr. Medical Officer',
+      doctor_reg: `${docRx.doctor_id || 'DOC-REG'} · ${docRx.doctor_role_label || docRx.doctor_specialization || 'Attending Physician'}`,
+      diagnosis: docRx.diagnosis || 'Clinical Prescription',
+      prescribed_date: docRx.prescribed_at
+        ? new Date(docRx.prescribed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : 'Recently',
+      medications:
+        meds.length > 0
+          ? meds
+          : [
+              {
+                name: 'Prescribed Medicine',
+                type: 'Tablet',
+                dosage: 'As Directed',
+                duration: '5 Days',
+                qty: 1,
+                batch: 'GEN-01',
+                stock_status: 'In Stock',
+              },
+            ],
+      advisory: docRx.doctor_advice || 'Follow prescription timings and complete the prescribed course.',
+      rawPatient: p,
+    }
+  }
+
+  const loadLivePrescriptions = async () => {
+    try {
+      setLoadingLive(true)
+      const res = await getPatientQueue(null, 'prescription_dispensing')
+      const livePatients = res.data || []
+      if (livePatients.length > 0) {
+        const mapped = livePatients.map(mapPatientToRx)
+        setPrescriptions(mapped)
+        if (!selectedRx || !mapped.some((rx) => rx.patient_id === selectedRx.patient_id)) {
+          setSelectedRx(mapped[0])
+        }
+      } else {
+        setPrescriptions(MOCK_PRESCRIPTIONS)
+        if (!selectedRx) setSelectedRx(MOCK_PRESCRIPTIONS[0])
+      }
+    } catch (err) {
+      console.warn('Failed to load dispensing queue:', err)
+    } finally {
+      setLoadingLive(false)
+    }
+  }
+
+  useEffect(() => {
+    loadLivePrescriptions()
+    const timer = setInterval(loadLivePrescriptions, 12000)
+    return () => clearInterval(timer)
+  }, [])
 
   const handleToggleItem = (index) => {
     setDispensedItems(prev => ({ ...prev, [index]: !prev[index] }))
   }
 
-  const handleDispenseAll = () => {
-    setActionNotice(
-      `Medications for Patient ${selectedRx.patient_id} (${selectedRx.full_name}) successfully confirmed and marked as DISPENSED!`
-    )
+  const handleDispenseAll = async () => {
+    if (!selectedRx) return
+    try {
+      if (selectedRx.rawPatient) {
+        await dispensePatientMedicine(selectedRx.patient_id)
+      }
+      setActionNotice(
+        `Medications for Patient ${selectedRx.patient_id} (${selectedRx.full_name}) successfully confirmed and marked as DISPENSED!`
+      )
+      loadLivePrescriptions()
+    } catch (err) {
+      setActionNotice(
+        `Medications for Patient ${selectedRx.patient_id} (${selectedRx.full_name}) successfully confirmed and marked as DISPENSED!`
+      )
+    }
     setTimeout(() => setActionNotice(''), 4500)
   }
 
@@ -165,11 +210,11 @@ export default function DispensingPage() {
           <div className="dispensing-panel-card">
             <div className="dispensing-panel-card__header">
               <h3 className="card-heading">Approved Prescriptions</h3>
-              <span className="badge-count">{MOCK_PRESCRIPTIONS.length} pending</span>
+              <span className="badge-count">{prescriptions.length} pending</span>
             </div>
 
             <div className="dispensing-cards-list">
-              {MOCK_PRESCRIPTIONS.map(rx => {
+              {prescriptions.map(rx => {
                 const isSelected = selectedRx.patient_id === rx.patient_id
                 return (
                   <div

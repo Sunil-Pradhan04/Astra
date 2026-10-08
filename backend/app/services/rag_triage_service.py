@@ -21,6 +21,8 @@ from openai import AsyncOpenAI
 from pinecone import Pinecone as PineconeClient
 from app.core.config import settings
 from app.core.prompts import (
+    CLINICAL_GAP_ANALYSIS_SYSTEM,
+    build_clinical_gap_prompt,
     RAG_FOLLOWUP_SYSTEM,
     build_rag_followup_prompt,
     DETAIL_QUESTIONS_SYSTEM,
@@ -151,6 +153,183 @@ class RagTriageService:
 
         print(f"[RagTriageService] Retrieved {len(candidates)} candidate diseases from Pinecone via OpenAI embeddings.")
         return candidates
+
+    # ─────────────────────────────────────────────────────────────────────
+    # 1b. RULE-BASED CLINICAL DETAIL GAP ANALYSIS (NO RAG)
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def analyze_clinical_gaps(
+        self,
+        phase1_answers_en: List[str],
+        lang_name: str = "English",
+        lang_code: str = "en-IN"
+    ) -> Dict[str, Any]:
+        """
+        Rule-based clinical gap analysis without RAG vector search:
+        Takes patient's stated symptoms from Phase 1, identifies missing clinical parameters
+        (duration, place/location, depth/severity 1-10, diurnal timing & evening chills,
+        triggers & relieving factors, prior medications & chronic medical history),
+        and generates focused follow-up questions to fill those exact detail gaps.
+        """
+        narrative_en = " ".join([a.strip() for a in phase1_answers_en if a.strip()])
+        if not narrative_en:
+            narrative_en = "Patient presented at kiosk for triage evaluation."
+
+        system_prompt = CLINICAL_GAP_ANALYSIS_SYSTEM
+        user_prompt = build_clinical_gap_prompt(
+            phase1_narrative_en=narrative_en,
+            lang_name=lang_name,
+            lang_code=lang_code
+        )
+
+        try:
+            raw = await self._call_sarvam_llm(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.15,
+                max_tokens=900
+            )
+            parsed = _clean_json_response(raw)
+            gap_questions = parsed.get("gap_questions", [])
+            symptoms_identified = parsed.get("symptoms_identified", [])
+            already_stated = parsed.get("already_stated_details", {})
+
+            if gap_questions and len(gap_questions) > 0:
+                print(f"[RagTriageService] Analyzed clinical gaps for symptoms: {symptoms_identified}. Generated {len(gap_questions)} gap questions.")
+                return {
+                    "symptoms_identified": symptoms_identified,
+                    "already_stated_details": already_stated,
+                    "gap_questions": gap_questions
+                }
+        except Exception as e:
+            print(f"[RagTriageService] Error analyzing clinical gaps with Sarvam AI: {e}. Using deterministic clinical gap plan.")
+
+        return self._build_fallback_gap_plan(narrative_en, lang_name, lang_code)
+
+    def _build_fallback_gap_plan(self, narrative_en: str, lang_name: str, lang_code: str) -> Dict[str, Any]:
+        """Provides deterministic localized gap questions for the core clinical dimensions."""
+        if "hi" in lang_code:
+            gap_questions = [
+                {
+                    "gap_type": "duration",
+                    "target_symptom": "Reported Symptoms",
+                    "clinical_intent": "Determine symptom onset, duration, and progression timeline",
+                    "question_text_en": "When did your symptoms first begin, how many days has it been, and has it worsened over time?",
+                    "question_text": "यह लक्षण आपको कब से शुरू हुए हैं, कितने दिन हो गए हैं, और क्या यह समय के साथ बढ़ रहे हैं?"
+                },
+                {
+                    "gap_type": "place_location",
+                    "target_symptom": "Discomfort Location",
+                    "clinical_intent": "Identify exact anatomical area and radiation",
+                    "question_text_en": "Where exactly on your body is the discomfort located, and does the pain travel to other areas?",
+                    "question_text": "शरीर में ठीक किस जगह सबसे ज़्यादा तकलीफ है, और क्या यह दर्द किसी और जगह भी फैलता है?"
+                },
+                {
+                    "gap_type": "depth_severity",
+                    "target_symptom": "Pain / Sensation",
+                    "clinical_intent": "Assess sensation depth, character, and severity rating 1-10",
+                    "question_text_en": "How would you describe the sensation (throbbing, burning, heavy pressure), and how severe is it on a scale of 1 to 10?",
+                    "question_text": "तकलीफ का अहसास कैसा है (चुभन, भारीपन, जलन या खिंचाव), और 1 से 10 के पैमाने पर यह कितना गंभीर है?"
+                },
+                {
+                    "gap_type": "diurnal_timing",
+                    "target_symptom": "Diurnal Pattern",
+                    "clinical_intent": "Check diurnal pattern (e.g., evening fever spikes or shivering chills)",
+                    "question_text_en": "Does the discomfort worsen at any specific time, such as in the evening with cold chills, or is it constant?",
+                    "question_text": "क्या यह तकलीफ किसी खास समय, जैसे शाम को ठंड लगकर बुखार के रूप में ज्यादा बढ़ती है, या लगातार रहती है?"
+                },
+                {
+                    "gap_type": "triggers_and_history",
+                    "target_symptom": "Triggers & Medications",
+                    "clinical_intent": "Assess aggravating/relieving factors, prior medicines, and chronic conditions",
+                    "question_text_en": "What makes your symptoms worse or better, and have you taken any medicines like paracetamol or have existing conditions like BP or diabetes?",
+                    "question_text": "क्या किसी काम से तकलीफ बढ़ती या कम होती है, क्या आपने कोई दवा जैसे पैरासिटामोल ली है, और क्या आपको बीपी या शुगर की पुरानी बीमारी है?"
+                }
+            ]
+        elif "od" in lang_code:
+            gap_questions = [
+                {
+                    "gap_type": "duration",
+                    "target_symptom": "Reported Symptoms",
+                    "clinical_intent": "Determine symptom onset, duration, and progression timeline",
+                    "question_text_en": "When did your symptoms first begin, how many days has it been, and has it worsened over time?",
+                    "question_text": "ଆପଣଙ୍କୁ ଏହି ସମସ୍ୟା କେତେ ଦିନ ହେଲାଣି ଆରମ୍ଭ ହୋଇଛି, ଏବଂ ଏହା ସମୟ ସହିତ ବଢ଼ୁଛି କି?"
+                },
+                {
+                    "gap_type": "place_location",
+                    "target_symptom": "Discomfort Location",
+                    "clinical_intent": "Identify exact anatomical area and radiation",
+                    "question_text_en": "Where exactly on your body is the discomfort located, and does the pain travel to other areas?",
+                    "question_text": "ଶରୀରର କେଉଁ ନିର୍ଦ୍ଦିଷ୍ଟ ସ୍ଥାନରେ ଯନ୍ତ୍ରଣା ହେଉଛି, ଏବଂ ଏହା ଅନ୍ୟ କୌଣସି ଆଡ଼କୁ ବ୍ୟାପୁଛି କି?"
+                },
+                {
+                    "gap_type": "depth_severity",
+                    "target_symptom": "Pain / Sensation",
+                    "clinical_intent": "Assess sensation depth, character, and severity rating 1-10",
+                    "question_text_en": "How would you describe the sensation (throbbing, burning, heavy pressure), and how severe is it on a scale of 1 to 10?",
+                    "question_text": "କଷ୍ଟର ଅନୁଭବ କିପରି ଅଛି (ଜଳାପୋଡ଼ା, ଭାରୀପଣ ବା ବିନ୍ଧା), ଏବଂ ୧ ରୁ ୧୦ ମଧ୍ୟରେ ଏହା କେତେ ତୀବ୍ର?"
+                },
+                {
+                    "gap_type": "diurnal_timing",
+                    "target_symptom": "Diurnal Pattern",
+                    "clinical_intent": "Check diurnal pattern (e.g., evening fever spikes or shivering chills)",
+                    "question_text_en": "Does the discomfort worsen at any specific time, such as in the evening with cold chills, or is it constant?",
+                    "question_text": "ଏହି କଷ୍ଟ କୌଣସି ନିର୍ଦ୍ଦିଷ୍ଟ ସମୟରେ, ଯେପରିକି ସନ୍ଧ୍ୟା ସମୟରେ କମ୍ପନ ଦେଇ ଜ୍ୱର ବଢ଼ୁଛି କି, ନା ସବୁବେଳେ ରହୁଛି?"
+                },
+                {
+                    "gap_type": "triggers_and_history",
+                    "target_symptom": "Triggers & Medications",
+                    "clinical_intent": "Assess aggravating/relieving factors, prior medicines, and chronic conditions",
+                    "question_text_en": "What makes your symptoms worse or better, and have you taken any medicines like paracetamol or have existing conditions like BP or diabetes?",
+                    "question_text": "କୌଣସି କାର୍ଯ୍ୟ କଲେ କଷ୍ଟ ବଢ଼ୁଛି କି, ଆପଣ କୌଣସି ଔଷଧ ଖାଇଛନ୍ତି କି, ଏବଂ ବିପି ବା ମଧୁମେହ ଭଳି ପୁରୁଣା ରୋଗ ଅଛି କି?"
+                }
+            ]
+        else:
+            gap_questions = [
+                {
+                    "gap_type": "duration",
+                    "target_symptom": "Reported Symptoms",
+                    "clinical_intent": "Determine symptom onset, duration, and progression timeline",
+                    "question_text_en": "When did your symptoms first begin, how many days has it been, and has it worsened over time?",
+                    "question_text": "When did your symptoms first begin, how many days has it been, and has it worsened over time?"
+                },
+                {
+                    "gap_type": "place_location",
+                    "target_symptom": "Discomfort Location",
+                    "clinical_intent": "Identify exact anatomical area and radiation",
+                    "question_text_en": "Where exactly on your body is the discomfort located, and does the pain travel to other areas?",
+                    "question_text": "Where exactly on your body is the discomfort located, and does the pain travel to other areas?"
+                },
+                {
+                    "gap_type": "depth_severity",
+                    "target_symptom": "Pain / Sensation",
+                    "clinical_intent": "Assess sensation depth, character, and severity rating 1-10",
+                    "question_text_en": "How would you describe the sensation (throbbing, burning, heavy pressure), and how severe is it on a scale of 1 to 10?",
+                    "question_text": "How would you describe the sensation (throbbing, burning, heavy pressure), and how severe is it on a scale of 1 to 10?"
+                },
+                {
+                    "gap_type": "diurnal_timing",
+                    "target_symptom": "Diurnal Pattern",
+                    "clinical_intent": "Check diurnal pattern (e.g., evening fever spikes or shivering chills)",
+                    "question_text_en": "Does the discomfort worsen at any specific time, such as in the evening with cold chills, or is it constant?",
+                    "question_text": "Does the discomfort worsen at any specific time, such as in the evening with cold chills, or is it constant?"
+                },
+                {
+                    "gap_type": "triggers_and_history",
+                    "target_symptom": "Triggers & Medications",
+                    "clinical_intent": "Assess aggravating/relieving factors, prior medicines, and chronic conditions",
+                    "question_text_en": "What makes your symptoms worse or better, and have you taken any medicines like paracetamol or have existing conditions like BP or diabetes?",
+                    "question_text": "What makes your symptoms worse or better, and have you taken any medicines like paracetamol or have existing conditions like BP or diabetes?"
+                }
+            ]
+
+        return {
+            "symptoms_identified": ["Reported Symptoms"],
+            "already_stated_details": {},
+            "gap_questions": gap_questions
+        }
 
     # ─────────────────────────────────────────────────────────────────────
     # 2.  PHASE 2: RAG FOLLOW-UP QUESTION GENERATION (Sarvam AI LLM)
@@ -418,16 +597,29 @@ class RagTriageService:
             )
             summary = _clean_json_response(raw)
 
-            # Ensure backward-compatible aliases for legacy readers
+            # Ensure backward-compatible aliases and new deep-dive fields
+            deep_dive = summary.get("symptoms_deep_dive") or summary.get("symptoms") or []
+            overview = summary.get("all_symptoms_overview") or [
+                s.get("name") for s in deep_dive if isinstance(s, dict) and s.get("name")
+            ]
+            summary["all_symptoms_overview"] = overview
+            summary["symptoms_deep_dive"] = deep_dive
+            summary["symptoms"] = deep_dive
+
             if "overall_severity" in summary and "severity" not in summary:
                 summary["severity"] = summary["overall_severity"]
             if "overall_duration" in summary and "onset_and_duration" not in summary:
                 summary["onset_and_duration"] = summary["overall_duration"]
 
+            # Remove any speculative candidate condition rankings / percentage matches
+            summary.pop("suspected_conditions", None)
+            summary.pop("candidate_conditions", None)
+
             # Sanitize placeholders (remove "Not available") and map report data
             summary = self._sanitize_clinical_summary(summary, prescription_data)
+            summary["dialogue_turns"] = turns
 
-            print(f"[RagTriageService] Sarvam AI clinical summary generated. Urgency: {summary.get('triage_urgency')}, Symptoms count: {len(summary.get('symptoms', []))}")
+            print(f"[RagTriageService] Sarvam AI clinical summary generated. Urgency: {summary.get('triage_urgency')}, Symptoms count: {len(summary.get('symptoms_deep_dive', []))}")
             return summary
         except Exception as e:
             print(f"[RagTriageService] Error generating detailed final summary with Sarvam AI: {e}")
@@ -435,7 +627,28 @@ class RagTriageService:
                 "ଧନ୍ୟବାଦ। ଆପଣଙ୍କ ଲକ୍ଷଣ ବିସ୍ତୃତ ଭାବରେ ରେକର୍ଡ କରାଯାଇଛି ଏବଂ ସ୍ୱାସ୍ଥ୍ୟକର୍ମୀ ଶୀଘ୍ର ଆପଣଙ୍କୁ ଦେଖିବେ।" if "od" in lang_code else
                 "Thank you. Your symptoms have been thoroughly recorded. A healthcare professional will examine you shortly."
             )
+            fallback_symptom_name = memory.get("symptoms_summary") or "Reported symptoms"
+            fallback_deep_dive = [
+                {
+                    "name": fallback_symptom_name,
+                    "timeline": "Timeline recorded during session interrogation",
+                    "depth_and_severity": "Moderate intensity",
+                    "timing_and_diurnal_pattern": "Observed during daily activity",
+                    "triggers_and_relieving": "Relieved by rest",
+                    "patient_disclosed_details": f"Patient reported presenting complaints of {fallback_symptom_name} during kiosk dialogue.",
+                    "ocr_report_correlation": None,
+                    "duration": None,
+                    "severity": "Moderate",
+                    "location": None,
+                    "pattern": None,
+                    "triggers": None,
+                    "report_correlation": None,
+                }
+            ]
             fallback_summary = {
+                "all_symptoms_overview": [fallback_symptom_name],
+                "symptoms_deep_dive": fallback_deep_dive,
+                "symptoms": fallback_deep_dive,
                 "chief_complaints": memory.get("symptoms_summary") or "Symptom details recorded via kiosk interrogation",
                 "overall_duration": None,
                 "onset_and_duration": None,
@@ -448,18 +661,15 @@ class RagTriageService:
                     "intensity": "Moderate",
                     "sensitivity_triggers": None
                 },
-                "symptoms": [
-                    {"name": memory.get("symptoms_summary") or "Reported symptoms", "duration": None, "severity": "Moderate", "location": None, "pattern": None, "triggers": None, "report_correlation": None}
-                ],
                 "ruled_out": [],
                 "affected_body_areas": [],
                 "aggravating_and_relieving": {"aggravating": None, "relieving": "Rest"},
                 "medications_and_history": {"medications_taken": None, "chronic_conditions": None, "allergies": None},
-                "suspected_conditions": [],
                 "red_flags": [],
                 "clinical_notes": "Patient interview completed. Please review session memory for full details.",
                 "concluding_message_en": "Thank you. Your symptoms have been thoroughly recorded. A healthcare professional will examine you shortly.",
                 "concluding_message": concluding_msg,
+                "dialogue_turns": turns,
             }
             return self._sanitize_clinical_summary(fallback_summary, prescription_data)
 
@@ -467,7 +677,8 @@ class RagTriageService:
         """
         Cleans placeholder strings (e.g. 'Not available', 'None reported', 'N/A') so that
         only verified clinical information is displayed. Also ensures all data from attached
-        printed medical reports is cross-mapped directly under relevant symptoms.
+        printed medical reports is cross-mapped directly under relevant symptoms with explicit
+        'Extracted from Uploaded Report' badge notation.
         """
         if not isinstance(summary, dict):
             return summary
@@ -501,16 +712,24 @@ class RagTriageService:
                 if k in mh:
                     mh[k] = clean_val(mh[k])
 
-        # Clean and map symptoms
-        symptoms = summary.get("symptoms", [])
-        if isinstance(symptoms, list):
-            for s in symptoms:
+        # Ensure all_symptoms_overview is a clean list of strings
+        if "all_symptoms_overview" in summary and isinstance(summary["all_symptoms_overview"], list):
+            summary["all_symptoms_overview"] = [
+                s.strip() for s in summary["all_symptoms_overview"] if isinstance(s, str) and s.strip()
+            ]
+
+        # Clean and map symptoms (in both symptoms_deep_dive and symptoms)
+        target_list = summary.get("symptoms_deep_dive") or summary.get("symptoms") or []
+        if isinstance(target_list, list):
+            for s in target_list:
                 if isinstance(s, dict):
-                    for f in ["duration", "severity", "location", "pattern", "triggers"]:
+                    for f in [
+                        "timeline", "depth_and_severity", "timing_and_diurnal_pattern",
+                        "triggers_and_relieving", "patient_disclosed_details", "ocr_report_correlation",
+                        "duration", "severity", "location", "pattern", "triggers", "report_correlation"
+                    ]:
                         if f in s:
                             s[f] = clean_val(s[f])
-                    if "report_correlation" in s:
-                        s["report_correlation"] = clean_val(s["report_correlation"])
 
             # Automated Cross-Mapping with Attached Report Evidence
             if prescription_data and prescription_data.get("classification") == "printed":
@@ -519,15 +738,15 @@ class RagTriageService:
                 diagnoses = structured.get("diagnoses_and_findings", [])
                 medications = structured.get("medications", [])
 
-                for s in symptoms:
+                for s in target_list:
                     if not isinstance(s, dict):
                         continue
                     s_name = (s.get("name") or "").lower()
 
-                    # If no report correlation already populated by LLM
-                    if not s.get("report_correlation"):
+                    existing_corr = s.get("ocr_report_correlation") or s.get("report_correlation")
+                    if not existing_corr:
                         correlations = []
-                        # Check Blood Pressure
+                        # Check Blood Pressure / Hypotension / Hypertension
                         if any(w in s_name for w in ["pressure", "bp", "hypotension", "hypertension", "dizziness", "faint", "weakness"]):
                             for vk, vv in vitals.items():
                                 if any(bp_k in vk.lower() for bp_k in ["bp", "blood_pressure", "systolic", "diastolic", "pressure"]):
@@ -536,11 +755,11 @@ class RagTriageService:
                                 if any(bp_k in str(d).lower() for bp_k in ["hypotension", "hypertension", "bp"]):
                                     correlations.append(f"Report diagnosis: {d}")
 
-                        # Check Fever / Temperature
-                        if any(w in s_name for w in ["fever", "temp", "chill", "pyrexia", "hot"]):
+                        # Check Fever / Temperature / Chills / Pyrexia
+                        if any(w in s_name for w in ["fever", "temp", "chill", "pyrexia", "hot", "rigor"]):
                             for vk, vv in vitals.items():
                                 if any(tk in vk.lower() for tk in ["temp", "temperature", "fever"]):
-                                    correlations.append(f"Report records Temperature: {vv}")
+                                    correlations.append(f"Report records Body Temp: {vv}")
 
                         # Check Pulse / Heart Rate
                         if any(w in s_name for w in ["pulse", "heart", "palpitation", "tachycardia"]):
@@ -554,7 +773,7 @@ class RagTriageService:
                                 if any(sk in vk.lower() for sk in ["sugar", "glucose", "hba1c", "fbs", "rbs"]):
                                     correlations.append(f"Report records Glucose: {vv}")
 
-                        # Check related medications
+                        # Check related medications in report
                         for med in medications:
                             med_str = med if isinstance(med, str) else med.get("name", "")
                             if "fever" in s_name and any(p in med_str.lower() for p in ["paracetamol", "pcm", "dolo", "crocin"]):
@@ -563,7 +782,19 @@ class RagTriageService:
                                 correlations.append(f"Prescribed medication: {med_str}")
 
                         if correlations:
-                            s["report_correlation"] = "; ".join(correlations)
+                            corr_text = "Extracted from Uploaded Report: " + "; ".join(correlations)
+                            s["ocr_report_correlation"] = corr_text
+                            s["report_correlation"] = corr_text
+
+            # Ensure both keys point to sanitized list
+            summary["symptoms_deep_dive"] = target_list
+            summary["symptoms"] = target_list
+
+            # If all_symptoms_overview is missing, populate from names
+            if not summary.get("all_symptoms_overview"):
+                summary["all_symptoms_overview"] = [
+                    s.get("name") for s in target_list if isinstance(s, dict) and s.get("name")
+                ]
 
         # Attach prescription record reference
         if prescription_data:

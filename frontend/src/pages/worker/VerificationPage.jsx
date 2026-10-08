@@ -20,6 +20,16 @@ import {
   Edit3,
   Save,
   RefreshCw,
+  ExternalLink,
+  AlertTriangle,
+  Eye,
+  X,
+  Building2,
+  MapPin,
+  Compass,
+  Navigation,
+  Printer,
+  Share2,
 } from 'lucide-react'
 import {
   getGroupedPatientQueues,
@@ -28,7 +38,102 @@ import {
   verifyPatientToDoctor,
   requestPatientRescreen,
   getDoctorsQueues,
+  askWorkerInterrogationChatbot,
+  getNearbyFacilities,
+  dispatchExternalReferral,
 } from '../../api/workerApi'
+
+// Helper to consolidate all attached report images across possible fields
+const getAttachedDocuments = (patient) => {
+  if (!patient) return []
+  const docs = []
+  const seenUrls = new Set()
+
+  const addDoc = (doc) => {
+    if (!doc) return
+    const url = doc.cloudinary_url || doc.image_url || doc.attached_image || (typeof doc === 'string' ? doc : null)
+    if (url && !seenUrls.has(url)) {
+      seenUrls.add(url)
+      const isHandwritten =
+        doc.classification === 'handwritten' ||
+        doc.is_handwritten === true ||
+        doc.processing_status === 'handwritten_human_review_required'
+      docs.push({
+        ...doc,
+        url,
+        isHandwritten,
+        classification: isHandwritten ? 'handwritten' : 'printed',
+        extracted: !isHandwritten,
+        structured_data: doc.structured_data || {},
+      })
+    }
+  }
+
+  if (Array.isArray(patient.prescription_records)) patient.prescription_records.forEach(addDoc)
+  if (Array.isArray(patient.ai_summary?.prescriptions)) patient.ai_summary.prescriptions.forEach(addDoc)
+  if (Array.isArray(patient.ocr_reports)) patient.ocr_reports.forEach(addDoc)
+  if (patient.ai_summary?.prescription_data) addDoc(patient.ai_summary.prescription_data)
+  if (patient.ai_summary?.structured_summary?.attached_prescription) addDoc(patient.ai_summary.structured_summary.attached_prescription)
+  return docs
+}
+
+// Helper to extract or synthesize patient interrogation turns
+const getInterrogationTurns = (patient) => {
+  if (!patient) return []
+  const summaryObj = patient.ai_summary?.structured_summary || patient.ai_summary || {}
+  if (Array.isArray(summaryObj.dialogue_turns) && summaryObj.dialogue_turns.length > 0) {
+    return summaryObj.dialogue_turns
+  }
+  if (Array.isArray(patient.dialogue_turns) && patient.dialogue_turns.length > 0) {
+    return patient.dialogue_turns
+  }
+  if (Array.isArray(patient.conversation_turns) && patient.conversation_turns.length > 0) {
+    return patient.conversation_turns
+  }
+
+  const turns = []
+  if (patient.chief_complaints) {
+    turns.push({
+      question: 'Presenting complaints at kiosk triage entry:',
+      answer: patient.chief_complaints,
+    })
+  }
+  const deepDive = summaryObj.symptoms_deep_dive || summaryObj.symptoms || []
+  deepDive.forEach((sym) => {
+    const symName = sym.name || 'Symptom'
+    if (sym.timeline) {
+      turns.push({
+        question: `When did your ${symName} begin and how has it progressed over time?`,
+        answer: sym.timeline,
+      })
+    }
+    if (sym.timing_and_diurnal_pattern) {
+      turns.push({
+        question: `Is there any particular diurnal timing pattern (morning, afternoon, or evening) for ${symName}?`,
+        answer: sym.timing_and_diurnal_pattern,
+      })
+    }
+    if (sym.depth_and_severity) {
+      turns.push({
+        question: `How would you describe the depth, sensation, and severity of ${symName}?`,
+        answer: sym.depth_and_severity,
+      })
+    }
+    if (sym.triggers_and_relieving) {
+      turns.push({
+        question: `What aggravates or relieves your ${symName}?`,
+        answer: sym.triggers_and_relieving,
+      })
+    }
+    if (sym.patient_disclosed_details) {
+      turns.push({
+        question: `Detailed interrogation disclosures regarding ${symName}:`,
+        answer: sym.patient_disclosed_details,
+      })
+    }
+  })
+  return turns
+}
 
 // Fallback demo cases if database has no pending patients
 const DEMO_CASES = [
@@ -62,33 +167,37 @@ const DEMO_CASES = [
         overall_severity: 'Critical',
         triage_urgency: 'Emergency',
         urgency_reason: 'Acute exertional chest discomfort with elevated systolic blood pressure (168 mmHg) and radiation.',
-        candidate_conditions: [
-          {
-            condition: 'Acute Coronary Syndrome / Exertional Angina',
-            match_confidence: 'High',
-            matching_rationale: 'Radiation to left shoulder, retrosternal tightness, high BP in elderly male.',
-          },
-          {
-            condition: 'Severe Essential Hypertension',
-            match_confidence: 'High',
-            matching_rationale: 'Stage 2 hypertensive range at intake.',
-          },
+        all_symptoms_overview: [
+          'Substernal Chest Pressure',
+          'Diaphoresis / Cold Sweats',
         ],
-        symptoms: [
+        symptoms_deep_dive: [
           {
             name: 'Substernal chest pressure',
+            timeline: 'Started 45 minutes ago during brisk walk',
+            depth_and_severity: 'Crushing heavy depth (rated 8/10)',
+            timing_and_diurnal_pattern: 'Sudden exertional onset in late evening, persistent and non-remitting',
+            triggers_and_relieving: 'Aggravated by brisk walking; not relieved by sitting still',
+            patient_disclosed_details: 'Patient stated: "I was walking briskly from the market around 6 PM when sudden crushing weight clamped my mid-chest and started radiating down my left arm. Sitting down did not ease the heaviness."',
+            ocr_report_correlation: 'Extracted from Uploaded Report: Blood pressure recorded 168/104 mmHg (Severe Stage-2 Hypertension); Prescribed Tab Amlodipine 5mg',
             duration: '45 minutes',
-            severity: 'Severe',
+            severity: 'Severe (8/10)',
             location: 'Retrosternal / Left shoulder',
             pattern: 'Constant',
             triggers: 'Exertion / Fast walking',
-            report_correlation: 'BP measured 168/104 mmHg',
+            report_correlation: 'Extracted from Uploaded Report: Blood pressure recorded 168/104 mmHg',
           },
           {
-            name: 'Diaphoresis / Mild Cold Sweats',
+            name: 'Diaphoresis / Cold Sweats',
+            timeline: 'Started 20 minutes ago',
+            depth_and_severity: 'Moderate profuse cold perspiration',
+            timing_and_diurnal_pattern: 'Episodic sweating accompanying the chest pain',
+            triggers_and_relieving: 'Concurrent with chest tightness',
+            patient_disclosed_details: 'Patient stated his forehead and palms became cold and clammy shortly after the chest discomfort started.',
+            ocr_report_correlation: null,
             duration: '20 minutes',
             severity: 'Moderate',
-            location: 'Generalized',
+            location: 'Generalized / Forehead',
             pattern: 'Episodic',
             triggers: null,
             report_correlation: null,
@@ -127,36 +236,41 @@ const DEMO_CASES = [
         overall_severity: 'Moderate',
         triage_urgency: 'Priority',
         urgency_reason: 'Febrile illness with 4-day cough in middle-aged male, oxygenation stable.',
-        candidate_conditions: [
-          {
-            condition: 'Acute Febrile Upper Respiratory Tract Infection',
-            match_confidence: 'High',
-            matching_rationale: 'Dry cough, fever, constitutional body aches without dyspnea at rest.',
-          },
-          {
-            condition: 'Viral Bronchitis',
-            match_confidence: 'Moderate',
-            matching_rationale: 'Subacute bronchial irritation pattern.',
-          },
+        all_symptoms_overview: [
+          'High-Grade Fever with Chills',
+          'Persistent Dry Cough',
+          'Generalized Body Aches',
         ],
-        symptoms: [
+        symptoms_deep_dive: [
           {
-            name: 'Dry Cough',
-            duration: '4 days',
-            severity: 'Moderate',
-            location: 'Throat / Upper chest',
-            pattern: 'Worse at night',
-            triggers: 'Cold air / Supine position',
-            report_correlation: null,
-          },
-          {
-            name: 'Fever with chills',
+            name: 'High-Grade Fever with Chills',
+            timeline: 'Started 2 days ago, progressive evening recurrence',
+            depth_and_severity: 'Moderate-Severe (measured 101.2 °F)',
+            timing_and_diurnal_pattern: 'Fever spikes specifically in the evening around 5:00 - 6:00 PM with intense shivering, subsides somewhat by morning',
+            triggers_and_relieving: 'Exacerbated by cold air exposure; partially relieved by warm fluids and paracetamol',
+            patient_disclosed_details: 'Patient explicitly stated that during daytime he feels relatively normal, but every evening around 5:30 PM severe fever with teeth-chattering chills sets in, requiring two thick blankets.',
+            ocr_report_correlation: 'Extracted from Uploaded Report: Clinical slip records oral temperature 101.2 °F; Tab Paracetamol 650mg prescribed',
             duration: '2 days',
             severity: 'Moderate (101.2 °F)',
             location: 'Systemic',
-            pattern: 'Intermittent',
-            triggers: null,
-            report_correlation: 'Oral temp 101.2 °F confirmed',
+            pattern: 'Intermittent (Evening Spikes)',
+            triggers: 'Cold drafts',
+            report_correlation: 'Extracted from Uploaded Report: Oral temperature 101.2 °F confirmed',
+          },
+          {
+            name: 'Persistent Dry Cough',
+            timeline: 'Started 4 days ago',
+            depth_and_severity: 'Moderate hacking bronchial irritation',
+            timing_and_diurnal_pattern: 'Worsens significantly at night when lying flat in bed',
+            triggers_and_relieving: 'Triggered by cold air and recumbent position; warm ginger water provides brief relief',
+            patient_disclosed_details: 'Patient noted no yellowish or bloody sputum, only dry irritating hacking that disrupts sleep between 1 AM and 4 AM.',
+            ocr_report_correlation: null,
+            duration: '4 days',
+            severity: 'Moderate',
+            location: 'Throat / Upper chest',
+            pattern: 'Nocturnal worsening',
+            triggers: 'Cold air / Supine posture',
+            report_correlation: null,
           },
         ],
         medications_and_history: {
@@ -164,7 +278,7 @@ const DEMO_CASES = [
           chronic_conditions: 'None reported',
           allergies: 'None reported',
         },
-        clinical_notes: 'Patient reports no breathlessness while resting. Throat slightly congested.',
+        clinical_notes: 'Patient reports no breathlessness while resting. Throat congested. Evening fever spike pattern confirmed.',
       },
     },
   },
@@ -192,16 +306,19 @@ const DEMO_CASES = [
         overall_severity: 'Mild',
         triage_urgency: 'Routine',
         urgency_reason: 'Tension-type characteristics without neurological red flags or nausea.',
-        candidate_conditions: [
-          {
-            condition: 'Tension-Type Headache & Eye Strain',
-            match_confidence: 'High',
-            matching_rationale: 'Bilateral pressure, neck tightness, prolonged screen time.',
-          },
+        all_symptoms_overview: [
+          'Bilateral Forehead Ache',
+          'Eye Strain & Neck Tightness',
         ],
-        symptoms: [
+        symptoms_deep_dive: [
           {
-            name: 'Forehead Band-like Ache',
+            name: 'Bilateral Forehead Ache',
+            timeline: 'Started 2 days ago, steady progression',
+            depth_and_severity: 'Mild-Moderate constant pressing depth (depth 5/10)',
+            timing_and_diurnal_pattern: 'Builds up progressively in the late afternoon and evening after continuous screen exposure',
+            triggers_and_relieving: 'Aggravated by bright computer glare and late hours; relieved by closing eyes in a dark quiet room',
+            patient_disclosed_details: 'Patient stated she felt like a tight rubber band was wrapped around her temples after working 9 hours on spreadsheets, denied visual aura, nausea, or light sensitivity.',
+            ocr_report_correlation: null,
             duration: '2 days',
             severity: 'Mild-Moderate',
             location: 'Bilateral fronto-temporal',
@@ -215,7 +332,7 @@ const DEMO_CASES = [
           chronic_conditions: 'None',
           allergies: 'Dust sensitivity',
         },
-        clinical_notes: 'No aura, no vomiting, normal visual acuity reported.',
+        clinical_notes: 'No aura, no vomiting, normal visual acuity reported. Tension pattern consistent.',
       },
     },
   },
@@ -224,12 +341,16 @@ const DEMO_CASES = [
 export default function VerificationPage() {
   const [emergencyQueue, setEmergencyQueue] = useState([])
   const [normalQueue, setNormalQueue] = useState([])
+  const [externalReferralQueue, setExternalReferralQueue] = useState([])
   const [selectedCase, setSelectedCase] = useState(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [actionNotice, setActionNotice] = useState({ text: '', type: 'success' })
+  const [viewingDocModal, setViewingDocModal] = useState(null)
 
-  // View Mode: 'review' | 'edit' | 'ai_assistant'
+  // View Mode: 'review' | 'edit' | 'external_referral'
   const [viewMode, setViewMode] = useState('review')
+  const [isAiDrawerOpen, setIsAiDrawerOpen] = useState(false)
+  const [drawerActiveTab, setDrawerActiveTab] = useState('rag') // 'rag' | 'chat' | 'interrogation'
   const [editFormData, setEditFormData] = useState({
     bp_systolic: '',
     bp_diastolic: '',
@@ -241,7 +362,91 @@ export default function VerificationPage() {
     urgency_level: 'green',
   })
 
-  // AI Co-Pilot State
+  // ── External Referral Radar & Dispatch State ──
+  const [editableReferralNote, setEditableReferralNote] = useState('')
+  const [radiusKm, setRadiusKm] = useState(20)
+  const [facilityType, setFacilityType] = useState('all')
+  const [facilitySearch, setFacilitySearch] = useState('')
+  const [nearbyFacilities, setNearbyFacilities] = useState([])
+  const [loadingFacilities, setLoadingFacilities] = useState(false)
+  const [selectedFacilityId, setSelectedFacilityId] = useState('')
+  const [dispatchingReferral, setDispatchingReferral] = useState(false)
+  const [dispatchedSlipModal, setDispatchedSlipModal] = useState(false)
+  const [lastDispatchedSlipData, setLastDispatchedSlipData] = useState(null)
+
+  const loadNearbyFacilities = async (targetRadius = radiusKm, targetType = facilityType, searchQ = facilitySearch) => {
+    setLoadingFacilities(true)
+    try {
+      const params = {}
+      if (targetRadius && targetRadius > 0) params.radius_km = targetRadius
+      if (targetType && targetType !== 'all') params.facility_type = targetType
+      if (searchQ && searchQ.trim()) params.search = searchQ.trim()
+
+      const res = await getNearbyFacilities(params)
+      const facs = res.data?.facilities || []
+      setNearbyFacilities(facs)
+      if (facs.length > 0) {
+        setSelectedFacilityId(facs[0].id)
+      }
+    } catch (err) {
+      console.warn('Failed to load nearby facilities:', err)
+    } finally {
+      setLoadingFacilities(false)
+    }
+  }
+
+  const handleDispatchExternalReferral = async () => {
+    if (!selectedCase || !selectedFacilityId) {
+      alert('Please select a destination healthcare facility from the radar list.')
+      return
+    }
+    const pickedFacility = nearbyFacilities.find((f) => f.id === selectedFacilityId)
+    if (!pickedFacility) {
+      alert('Selected facility not found.')
+      return
+    }
+    if (!editableReferralNote.trim()) {
+      alert('Referral memorandum note cannot be blank.')
+      return
+    }
+    setDispatchingReferral(true)
+    try {
+      const payload = {
+        target_care_hub_id: pickedFacility.id,
+        target_care_hub_name: pickedFacility.name,
+        target_care_hub_type: pickedFacility.hub_type,
+        target_care_hub_distance_km: pickedFacility.distance_km,
+        updated_referral_note: editableReferralNote.trim(),
+      }
+      const res = await dispatchExternalReferral(selectedCase.patient_id, payload)
+      const updatedPatient = res.data?.patient || selectedCase
+
+      setLastDispatchedSlipData({
+        patient: updatedPatient,
+        facility: pickedFacility,
+        note: editableReferralNote.trim(),
+        dispatchedAt: new Date().toISOString(),
+      })
+      setDispatchedSlipModal(true)
+      showNotification(
+        `External referral for ${selectedCase.full_name} (${selectedCase.patient_id}) successfully dispatched to ${pickedFacility.name}!`,
+        'success'
+      )
+      loadQueues()
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Failed to dispatch external referral.')
+    } finally {
+      setDispatchingReferral(false)
+    }
+  }
+
+  // RAG Interrogation Q&A State (astra-conversation)
+  const [ragMessage, setRagMessage] = useState('')
+  const [isRagProcessing, setIsRagProcessing] = useState(false)
+  const [ragHistory, setRagHistory] = useState([])
+  const ragChatScrollRef = useRef(null)
+
+  // AI Co-Pilot State (Natural language edits)
   const [aiMessage, setAiMessage] = useState('')
   const [isAiProcessing, setIsAiProcessing] = useState(false)
   const [aiFeedbackHistory, setAiFeedbackHistory] = useState([])
@@ -286,18 +491,22 @@ export default function VerificationPage() {
 
       const emList = data.emergency_queue || []
       const normList = data.normal_queue || []
+      const refList = data.external_referral_queue || []
 
-      if (emList.length === 0 && normList.length === 0) {
+      if (emList.length === 0 && normList.length === 0 && refList.length === 0) {
         setEmergencyQueue(DEMO_CASES.filter((c) => c.priority === 'emergency'))
         setNormalQueue(DEMO_CASES.filter((c) => c.priority !== 'emergency'))
+        setExternalReferralQueue([])
       } else {
         setEmergencyQueue(emList)
         setNormalQueue(normList)
+        setExternalReferralQueue(refList)
       }
     } catch (err) {
       console.error('Failed to load patient queues:', err)
       setEmergencyQueue(DEMO_CASES.filter((c) => c.priority === 'emergency'))
       setNormalQueue(DEMO_CASES.filter((c) => c.priority !== 'emergency'))
+      setExternalReferralQueue([])
     } finally {
       if (showSpin) setIsRefreshing(false)
     }
@@ -320,18 +529,21 @@ export default function VerificationPage() {
         syncSelectedCase(emergencyQueue[0])
       } else if (normalQueue.length > 0) {
         syncSelectedCase(normalQueue[0])
+      } else if (externalReferralQueue.length > 0) {
+        syncSelectedCase(externalReferralQueue[0])
       }
     } else {
       // Check if selected case is still pending
-      const allPending = [...emergencyQueue, ...normalQueue]
+      const allPending = [...emergencyQueue, ...normalQueue, ...externalReferralQueue]
       const found = allPending.find((p) => p.patient_id === selectedCase.patient_id)
       if (!found) {
         if (emergencyQueue.length > 0) syncSelectedCase(emergencyQueue[0])
         else if (normalQueue.length > 0) syncSelectedCase(normalQueue[0])
+        else if (externalReferralQueue.length > 0) syncSelectedCase(externalReferralQueue[0])
         else setSelectedCase(null)
       }
     }
-  }, [emergencyQueue, normalQueue])
+  }, [emergencyQueue, normalQueue, externalReferralQueue])
 
   const syncSelectedCase = (patient) => {
     if (!patient) return
@@ -348,6 +560,23 @@ export default function VerificationPage() {
     })
     setWorkerNotes(patient.verification_notes || '')
     setAiFeedbackHistory(patient.ai_update_history || [])
+
+    // If case is external referral, set note and auto-switch to external_referral view
+    const isExtRef = patient.status === 'pending_external_referral' || !!patient.external_referral
+    if (isExtRef) {
+      const note =
+        patient.external_referral?.final_referral_note ||
+        patient.external_referral?.updated_referral_note ||
+        patient.external_referral?.ai_referral_note ||
+        ''
+      setEditableReferralNote(note)
+      setViewMode('external_referral')
+      loadNearbyFacilities(radiusKm, facilityType, facilitySearch)
+    } else {
+      if (viewMode === 'external_referral') {
+        setViewMode('review')
+      }
+    }
   }
 
   const showNotification = (text, type = 'success') => {
@@ -428,6 +657,49 @@ export default function VerificationPage() {
     }
   }
 
+  // ── Handler: RAG Interrogation Q&A Chatbot (astra-conversation) ──
+  const handleSendRagQuery = async (customMessage) => {
+    const textToSend = (customMessage || ragMessage).trim()
+    if (!textToSend || !selectedCase || isRagProcessing) return
+
+    setIsRagProcessing(true)
+    setRagMessage('')
+
+    try {
+      const res = await askWorkerInterrogationChatbot(selectedCase.patient_id, textToSend)
+      const data = res.data || {}
+      setRagHistory((prev) => [
+        ...prev,
+        {
+          id: Math.random().toString(),
+          timestamp: new Date().toISOString(),
+          message: textToSend,
+          ai_reply: data.reply || 'Clinical interrogation response generated.',
+          citations: data.citations || [],
+        },
+      ])
+    } catch (err) {
+      console.warn('Worker AI RAG query error:', err)
+      setRagHistory((prev) => [
+        ...prev,
+        {
+          id: Math.random().toString(),
+          timestamp: new Date().toISOString(),
+          message: textToSend,
+          ai_reply: `No response from conversation vector service. Fallback triage summary for ${selectedCase.full_name}: "${selectedCase.chief_complaints}".`,
+          citations: [],
+        },
+      ])
+    } finally {
+      setIsRagProcessing(false)
+      setTimeout(() => {
+        if (ragChatScrollRef.current) {
+          ragChatScrollRef.current.scrollTop = ragChatScrollRef.current.scrollHeight
+        }
+      }, 100)
+    }
+  }
+
   // ── Handler: Final "Approve & Add to Doctor Queue" ──
   const handleApproveForDoctor = async () => {
     if (!selectedCase) return
@@ -484,9 +756,12 @@ export default function VerificationPage() {
   // Extract structured summary fields
   const summaryObj =
     selectedCase?.ai_summary?.structured_summary || selectedCase?.ai_summary || {}
-  const candidateConditions = summaryObj.candidate_conditions || []
-  const symptomsList = summaryObj.symptoms || []
+  const allSymptoms = summaryObj.all_symptoms_overview?.length
+    ? summaryObj.all_symptoms_overview
+    : (summaryObj.symptoms_deep_dive || summaryObj.symptoms || []).map((s) => (typeof s === 'string' ? s : s?.name)).filter(Boolean)
+  const symptomsDeepDive = summaryObj.symptoms_deep_dive || summaryObj.symptoms || []
   const medHistory = summaryObj.medications_and_history || {}
+  const attachedDocs = getAttachedDocuments(selectedCase)
   const isEmergencyCase =
     selectedCase?.priority === 'emergency' ||
     selectedCase?.urgency_detected ||
@@ -636,6 +911,65 @@ export default function VerificationPage() {
                 )}
             </div>
 
+            {/* 🏥 3. External Referral Review Queue Card */}
+            <div className="hw-queue-category-card" style={{ border: '1.5px solid #818cf8', background: '#faf5ff' }}>
+              <div className="hw-queue-header">
+                <div className="hw-queue-header-left">
+                  <Building2 size={16} color="#4f46e5" />
+                  <h3 className="hw-queue-title" style={{ color: '#4338ca' }}>
+                    External Referrals
+                  </h3>
+                </div>
+                <span className="hw-waiting-count-badge" style={{ background: '#ede9fe', color: '#4338ca', fontWeight: 800 }}>
+                  {externalReferralQueue.length} To Review
+                </span>
+              </div>
+
+              {/* Slots */}
+              <div className="hw-queue-slots-grid">
+                {externalReferralQueue.length === 0 ? (
+                  <div className="hw-empty-queue-slot" style={{ color: '#6366f1' }}>
+                    No hospital transfers pending review
+                  </div>
+                ) : (
+                  externalReferralQueue.slice(0, 5).map((patient, index) => {
+                    const isSelected = selectedCase?.patient_id === patient.patient_id
+                    return (
+                      <div
+                        key={patient.patient_id}
+                        onClick={() => syncSelectedCase(patient)}
+                        className={`hw-slot-box ${isSelected ? 'is-selected' : ''}`}
+                        style={{
+                          border: isSelected ? '2px solid #4338ca' : '1px solid #cbd5e1',
+                          background: isSelected ? '#f5f3ff' : '#ffffff',
+                        }}
+                      >
+                        <div className="hw-slot-number" style={{ color: '#4338ca' }}>#{index + 1}</div>
+                        <div className="hw-slot-content">
+                          <div className="hw-slot-header">
+                            <span className="hw-slot-id">{patient.patient_id}</span>
+                            <span style={{ fontSize: 9.5, fontWeight: 800, background: '#fef3c7', color: '#92400e', padding: '1px 5px', borderRadius: 4 }}>
+                              {patient.external_referral?.urgency || 'URGENT'}
+                            </span>
+                          </div>
+                          <h4 className="hw-slot-name">{patient.full_name}</h4>
+                          <div className="hw-slot-meta">
+                            <span>Diag: {patient.external_referral?.possible_diagnosis || 'Referral'}</span>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })
+                )}
+              </div>
+
+              {externalReferralQueue.length > 5 && (
+                <div className="hw-queue-more-bar" style={{ color: '#4338ca', background: '#e0e7ff' }}>
+                  +{externalReferralQueue.length - 5} more external referral cases
+                </div>
+              )}
+            </div>
+
             {/* Quick Refresh Button */}
             <button
               type="button"
@@ -692,7 +1026,7 @@ export default function VerificationPage() {
                     </div>
                   </div>
 
-                  {/* Mode Tabs */}
+                  {/* Mode Tabs & AI Trigger */}
                   <div className="hw-hero-controls">
                     <div className="hw-tab-pill-group">
                       <button
@@ -711,15 +1045,39 @@ export default function VerificationPage() {
                         <Edit3 size={13} style={{ display: 'inline', marginRight: 4 }} />
                         Manual Edit
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => setViewMode('ai_assistant')}
-                        className={`hw-tab-pill ${viewMode === 'ai_assistant' ? 'active' : ''}`}
-                      >
-                        <Sparkles size={13} style={{ display: 'inline', marginRight: 4 }} />
-                        AI Co-Pilot
-                      </button>
+                      {(selectedCase.status === 'pending_external_referral' || selectedCase.external_referral) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setViewMode('external_referral')
+                            loadNearbyFacilities(radiusKm, facilityType, facilitySearch)
+                          }}
+                          className={`hw-tab-pill ${viewMode === 'external_referral' ? 'active' : ''}`}
+                          style={{
+                            background: viewMode === 'external_referral' ? '#4338ca' : '#f5f3ff',
+                            color: viewMode === 'external_referral' ? '#ffffff' : '#4338ca',
+                            fontWeight: 700,
+                          }}
+                        >
+                          <Building2 size={13} style={{ display: 'inline', marginRight: 4 }} />
+                          Hospital Referral Radar
+                        </button>
+                      )}
                     </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setIsAiDrawerOpen(true)}
+                      className="hw-btn-ai-trigger"
+                      id="btn-open-ai-drawer"
+                      title="Open interactive AI assistant to interrogate case disclosures or update parameters"
+                    >
+                      <Sparkles size={14} />
+                      <span>Chat with Case / AI Co-Pilot</span>
+                      {aiFeedbackHistory.length > 0 && (
+                        <span className="hw-ai-trigger-count">{aiFeedbackHistory.length}</span>
+                      )}
+                    </button>
                   </div>
                 </div>
 
@@ -890,108 +1248,553 @@ export default function VerificationPage() {
                   )}
                 </div>
 
-                {/* ── AI Co-Pilot Assistant Banner & Chat ── */}
-                <div className="hw-ai-assistant-card">
-                  <div className="hw-ai-assistant-top">
-                    <div className="hw-ai-assistant-badge">
-                      <Sparkles size={16} />
-                      <span>AI Co-Pilot (Instruct AI to Update Report)</span>
+                {/* ── EXTERNAL REFERRAL RADAR WORKSPACE OR INTAKE VERIFICATION ── */}
+                {viewMode === 'external_referral' ? (
+                  <div style={{ padding: '20px 24px 30px' }}>
+                    {/* 1. Referring Doctor & Clinical Case Justification Box */}
+                    <div
+                      style={{
+                        background: '#f8fafc',
+                        border: '1.5px solid #cbd5e1',
+                        borderRadius: 12,
+                        padding: '18px 20px',
+                        marginBottom: 20,
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <div style={{ background: '#4338ca', color: '#fff', borderRadius: 8, padding: 7, display: 'flex' }}>
+                            <Building2 size={18} />
+                          </div>
+                          <div>
+                            <h4 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: '#0f172a' }}>
+                              Hospital-to-Another Clinical Transfer Memorandum
+                            </h4>
+                            <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+                              Referring Physician: Dr. <strong>{selectedCase.external_referral?.referring_doctor_name || 'Attending Physician'}</strong> ({selectedCase.external_referral?.referring_doctor_role || 'Physician'}) · Origin: {selectedCase.external_referral?.referring_care_hub_name || 'Current Hospital Hub'}
+                            </div>
+                          </div>
+                        </div>
+                        <span
+                          style={{
+                            background: '#fef3c7',
+                            color: '#92400e',
+                            fontSize: 11,
+                            fontWeight: 800,
+                            padding: '4px 10px',
+                            borderRadius: 6,
+                            letterSpacing: 0.5,
+                          }}
+                        >
+                          {selectedCase.external_referral?.urgency?.toUpperCase() || 'URGENT TRANSFER'}
+                        </span>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, background: '#ffffff', padding: 14, borderRadius: 8, border: '1px solid #e2e8f0', fontSize: 13 }}>
+                        <div>
+                          <span style={{ fontSize: 11, fontWeight: 800, color: '#64748b', textTransform: 'uppercase', display: 'block', marginBottom: 3 }}>
+                            Working / Provisional Diagnosis:
+                          </span>
+                          <strong style={{ color: '#0f172a', fontSize: 14 }}>
+                            {selectedCase.external_referral?.possible_diagnosis || 'Under Evaluation'}
+                          </strong>
+                        </div>
+                        <div>
+                          <span style={{ fontSize: 11, fontWeight: 800, color: '#64748b', textTransform: 'uppercase', display: 'block', marginBottom: 3 }}>
+                            Reason & Justification for Transfer:
+                          </span>
+                          <span style={{ color: '#0f172a' }}>
+                            {selectedCase.external_referral?.reason_for_referral || 'Specialist intervention needed'}
+                          </span>
+                        </div>
+                        {selectedCase.external_referral?.doctor_notes && (
+                          <div style={{ gridColumn: 'span 2', borderTop: '1px solid #f1f5f9', paddingTop: 8 }}>
+                            <span style={{ fontSize: 11, fontWeight: 800, color: '#64748b', textTransform: 'uppercase', display: 'block', marginBottom: 2 }}>
+                              Doctor's Bedside Clinical Notes:
+                            </span>
+                            <span style={{ color: '#334155', fontStyle: 'italic' }}>
+                              "{selectedCase.external_referral.doctor_notes}"
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                    <span style={{ fontSize: 11, color: '#6d28d9' }}>
-                      Type in natural language — AI automatically modifies clinical fields
+
+                    {/* 2. Editable Referral Note (Health Worker Update) */}
+                    <div
+                      style={{
+                        background: '#ffffff',
+                        border: '1.5px solid #cbd5e1',
+                        borderRadius: 12,
+                        padding: '18px 20px',
+                        marginBottom: 20,
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <Edit3 size={16} color="#4338ca" />
+                          <h4 style={{ margin: 0, fontSize: 14.5, fontWeight: 800, color: '#0f172a' }}>
+                            Official Clinical Referral Memorandum (Health Worker Editable)
+                          </h4>
+                        </div>
+                        <span style={{ fontSize: 11.5, color: '#64748b' }}>
+                          Update note with transport protocol, ambulance escort, or oxygen requirements
+                        </span>
+                      </div>
+
+                      <textarea
+                        rows={8}
+                        value={editableReferralNote}
+                        onChange={(e) => setEditableReferralNote(e.target.value)}
+                        placeholder="Official referral memorandum..."
+                        style={{
+                          width: '100%',
+                          padding: '12px 14px',
+                          borderRadius: 8,
+                          border: '1.5px solid #cbd5e1',
+                          fontSize: 12.5,
+                          lineHeight: 1.6,
+                          fontFamily: 'monospace',
+                          background: '#f8fafc',
+                          color: '#0f172a',
+                        }}
+                      />
+                    </div>
+
+                    {/* 3. Facilities Radius Radar & 8 Types Filter */}
+                    <div
+                      style={{
+                        background: '#ffffff',
+                        border: '1.5px solid #cbd5e1',
+                        borderRadius: 12,
+                        padding: '18px 20px',
+                        marginBottom: 24,
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <Compass size={17} color="#4338ca" />
+                          <h4 style={{ margin: 0, fontSize: 15, fontWeight: 800, color: '#0f172a' }}>
+                            Available Healthcare Facilities Radar ({nearbyFacilities.length} Found)
+                          </h4>
+                        </div>
+                        <span style={{ fontSize: 11.5, color: '#64748b', fontWeight: 600 }}>
+                          Live Haversine Distance & Google Maps Direction API
+                        </span>
+                      </div>
+
+                      {/* Filter Controls Bar */}
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', marginBottom: 16, background: '#f8fafc', padding: '12px 14px', borderRadius: 10, border: '1px solid #e2e8f0' }}>
+                        {/* Radius Range Chips */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 800, color: '#475569', textTransform: 'uppercase' }}>
+                            Radius:
+                          </span>
+                          {[
+                            { label: '10 km', val: 10 },
+                            { label: '20 km', val: 20 },
+                            { label: '50 km', val: 50 },
+                            { label: '100 km', val: 100 },
+                            { label: 'All Distances', val: null },
+                          ].map((r) => {
+                            const isActive = radiusKm === r.val
+                            return (
+                              <button
+                                key={r.label}
+                                type="button"
+                                onClick={() => {
+                                  setRadiusKm(r.val)
+                                  loadNearbyFacilities(r.val, facilityType, facilitySearch)
+                                }}
+                                style={{
+                                  padding: '5px 11px',
+                                  borderRadius: 6,
+                                  fontSize: 12,
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                  border: isActive ? '1.5px solid #4338ca' : '1px solid #cbd5e1',
+                                  background: isActive ? '#4338ca' : '#ffffff',
+                                  color: isActive ? '#ffffff' : '#334155',
+                                  transition: 'all 0.15s ease',
+                                }}
+                              >
+                                {r.label}
+                              </button>
+                            )
+                          })}
+                        </div>
+
+                        {/* Facility Type Selector (All 8 Types) */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 800, color: '#475569', textTransform: 'uppercase' }}>
+                            Facility Type:
+                          </span>
+                          <select
+                            value={facilityType}
+                            onChange={(e) => {
+                              const val = e.target.value
+                              setFacilityType(val)
+                              loadNearbyFacilities(radiusKm, val, facilitySearch)
+                            }}
+                            style={{
+                              padding: '6px 12px',
+                              borderRadius: 6,
+                              fontSize: 12,
+                              fontWeight: 600,
+                              border: '1.5px solid #cbd5e1',
+                              background: '#ffffff',
+                              color: '#0f172a',
+                            }}
+                          >
+                            <option value="all">All 8 Facility Types</option>
+                            <option value="Government Hospital">Government Hospital</option>
+                            <option value="Primary Health Center (PHC)">Primary Health Center (PHC)</option>
+                            <option value="Community Health Center (CHC)">Community Health Center (CHC)</option>
+                            <option value="District / Tertiary Hospital">District / Tertiary Hospital</option>
+                            <option value="Public Health Camp">Public Health Camp</option>
+                            <option value="Company Clinic">Company Clinic</option>
+                            <option value="Industrial Health Unit">Industrial Health Unit</option>
+                            <option value="Campus Health Center">Campus Health Center</option>
+                          </select>
+                        </div>
+
+                        {/* Search Input */}
+                        <div style={{ flex: 1, minWidth: 160 }}>
+                          <input
+                            type="text"
+                            placeholder="Search facility name or location..."
+                            value={facilitySearch}
+                            onChange={(e) => {
+                              setFacilitySearch(e.target.value)
+                              loadNearbyFacilities(radiusKm, facilityType, e.target.value)
+                            }}
+                            style={{
+                              width: '100%',
+                              padding: '6px 12px',
+                              borderRadius: 6,
+                              fontSize: 12,
+                              border: '1.5px solid #cbd5e1',
+                              background: '#ffffff',
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Facilities List Grid */}
+                      {loadingFacilities ? (
+                        <div style={{ textAlign: 'center', padding: '40px', color: '#64748b' }}>
+                          <RefreshCw size={22} className="animate-spin" style={{ margin: '0 auto 8px' }} />
+                          <div>Scanning radar for facilities in selected range...</div>
+                        </div>
+                      ) : nearbyFacilities.length === 0 ? (
+                        <div style={{ padding: '24px', textAlign: 'center', background: '#f8fafc', borderRadius: 8, border: '1px dashed #cbd5e1', color: '#64748b', fontSize: 13 }}>
+                          No healthcare facilities found within {radiusKm ? `${radiusKm} km` : 'this criteria'}. Try expanding the radius or changing the facility type.
+                        </div>
+                      ) : (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12, maxHeight: '400px', overflowY: 'auto', paddingRight: 4 }}>
+                          {nearbyFacilities.map((fac) => {
+                            const isPicked = selectedFacilityId === fac.id
+                            return (
+                              <div
+                                key={fac.id}
+                                onClick={() => setSelectedFacilityId(fac.id)}
+                                style={{
+                                  padding: '14px 16px',
+                                  borderRadius: 10,
+                                  border: isPicked ? '2px solid #4338ca' : '1.5px solid #e2e8f0',
+                                  background: isPicked ? '#f5f3ff' : '#ffffff',
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: 8,
+                                  transition: 'all 0.15s ease',
+                                  boxShadow: isPicked ? '0 3px 12px rgba(67, 56, 202, 0.15)' : 'none',
+                                }}
+                              >
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <input
+                                      type="radio"
+                                      name="radar_facility"
+                                      checked={isPicked}
+                                      onChange={() => setSelectedFacilityId(fac.id)}
+                                      style={{ accentColor: '#4338ca', cursor: 'pointer' }}
+                                    />
+                                    <strong style={{ fontSize: 13.5, color: '#0f172a' }}>{fac.name}</strong>
+                                  </div>
+                                  <span
+                                    style={{
+                                      fontSize: 11,
+                                      fontWeight: 800,
+                                      padding: '2px 7px',
+                                      borderRadius: 5,
+                                      background: '#ede9fe',
+                                      color: '#4338ca',
+                                      whiteSpace: 'nowrap',
+                                    }}
+                                  >
+                                    📍 {fac.distance_km} km
+                                  </span>
+                                </div>
+
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                  <span
+                                    style={{
+                                      fontSize: 10.5,
+                                      fontWeight: 700,
+                                      padding: '2px 6px',
+                                      borderRadius: 4,
+                                      background: '#f1f5f9',
+                                      color: '#334155',
+                                    }}
+                                  >
+                                    {fac.hub_type}
+                                  </span>
+                                  {fac.phone && (
+                                    <span style={{ fontSize: 11, color: '#64748b' }}>
+                                      ☎️ {fac.phone}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div style={{ fontSize: 11.5, color: '#64748b', lineHeight: 1.4 }}>
+                                  {fac.address}
+                                </div>
+
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, borderTop: '1px solid #f1f5f9', paddingTop: 8 }}>
+                                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                                    {(fac.specialties || []).slice(0, 3).map((spec, sidx) => (
+                                      <span key={sidx} style={{ fontSize: 9.5, background: '#f8fafc', border: '1px solid #e2e8f0', padding: '1px 5px', borderRadius: 3, color: '#475569' }}>
+                                        {spec}
+                                      </span>
+                                    ))}
+                                  </div>
+                                  <a
+                                    href={fac.google_maps_directions_url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    style={{
+                                      fontSize: 11,
+                                      fontWeight: 700,
+                                      color: '#2563eb',
+                                      textDecoration: 'none',
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: 4,
+                                      padding: '3px 8px',
+                                      borderRadius: 4,
+                                      background: '#eff6ff',
+                                    }}
+                                  >
+                                    <Navigation size={11} />
+                                    <span>Google Maps Route</span>
+                                  </a>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 4. Final Confirmation & Dispatch Action Bar */}
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        background: '#0f172a',
+                        color: '#ffffff',
+                        padding: '16px 20px',
+                        borderRadius: 12,
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontSize: 11, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>
+                          Selected Target Facility for Transfer:
+                        </div>
+                        <div style={{ fontSize: 14, fontWeight: 800, marginTop: 2 }}>
+                          {(() => {
+                            const picked = nearbyFacilities.find((f) => f.id === selectedFacilityId)
+                            if (!picked) return 'Please select a facility from the radar grid'
+                            return `${picked.name} (${picked.hub_type} · ${picked.distance_km} km away)`
+                          })()}
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleDispatchExternalReferral}
+                        disabled={dispatchingReferral || !selectedFacilityId || !editableReferralNote.trim()}
+                        style={{
+                          background: '#10b981',
+                          color: '#ffffff',
+                          border: 'none',
+                          borderRadius: 8,
+                          padding: '11px 24px',
+                          fontSize: 13.5,
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          opacity: (!selectedFacilityId || !editableReferralNote.trim()) ? 0.6 : 1,
+                        }}
+                      >
+                        {dispatchingReferral ? (
+                          <>
+                            <RefreshCw size={15} className="animate-spin" />
+                            <span>Dispatching Transfer...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Send size={15} />
+                            <span>Confirm & Dispatch Referral</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                {/* ── ATTACHED DOCUMENTS & OCR PRESCRIPTIONS GALLERY (AT TOP OF DOSSIER) ── */}
+                <div className="hw-section" style={{ border: '1px solid #cbd5e1', background: '#ffffff' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                    <h4 className="hw-section-title" style={{ margin: 0 }}>
+                      <FileText size={15} />
+                      <span>Attached Medical Documents & Diagnostic Reports ({attachedDocs.length})</span>
+                    </h4>
+                    <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}>
+                      Astra OCR processes printed documents · Handwritten notes visually inspected
                     </span>
                   </div>
 
-                  {/* Suggestion Chips */}
-                  <div className="hw-ai-chips-list">
-                    <button
-                      type="button"
-                      className="hw-ai-chip"
-                      onClick={() => handleSendAiUpdate('Patient has mild dry cough for 3 days, add to symptoms')}
-                    >
-                      + Add dry cough for 3 days
-                    </button>
-                    <button
-                      type="button"
-                      className="hw-ai-chip"
-                      onClick={() => handleSendAiUpdate('Measured BP again: 135/85 mmHg, update vitals')}
-                    >
-                      + Update BP to 135/85
-                    </button>
-                    <button
-                      type="button"
-                      className="hw-ai-chip"
-                      onClick={() => handleSendAiUpdate('Patient has mild fever 100.8 F, update vitals')}
-                    >
-                      + Update Temp to 100.8 °F
-                    </button>
-                    <button
-                      type="button"
-                      className="hw-ai-chip"
-                      onClick={() => handleSendAiUpdate('Escalate priority to Emergency due to increasing chest tightness')}
-                    >
-                      + Escalate to Emergency
-                    </button>
-                    <button
-                      type="button"
-                      className="hw-ai-chip"
-                      onClick={() => handleSendAiUpdate('Patient denies penicillin allergy, only allergic to dust')}
-                    >
-                      + Update allergies
-                    </button>
-                  </div>
-
-                  {/* Input Row */}
-                  <div className="hw-ai-input-row">
-                    <input
-                      type="text"
-                      className="hw-ai-input"
-                      placeholder="e.g. 'Add mild throat pain since yesterday and set BP to 130/85'..."
-                      value={aiMessage}
-                      onChange={(e) => setAiMessage(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleSendAiUpdate()
-                      }}
-                      disabled={isAiProcessing}
-                    />
-                    <button
-                      type="button"
-                      className="hw-ai-send-btn"
-                      onClick={() => handleSendAiUpdate()}
-                      disabled={isAiProcessing || !aiMessage.trim()}
-                    >
-                      {isAiProcessing ? (
-                        <>
-                          <RefreshCw size={14} className="animate-spin" />
-                          <span>Updating...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Send size={14} />
-                          <span>Instruct AI</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-
-                  {/* AI Interaction Audit Feed */}
-                  {aiFeedbackHistory.length > 0 && (
-                    <div className="hw-ai-history-feed" ref={aiChatScrollRef}>
-                      {aiFeedbackHistory.map((item, idx) => (
-                        <div key={item.id || idx} className="hw-ai-history-item">
-                          <div className="prompt">
-                            💬 Worker Instruction: "{item.message || item.worker_message}"
-                          </div>
-                          <div className="reply">🤖 {item.ai_reply}</div>
-                          {item.changes_applied && item.changes_applied.length > 0 && (
-                            <div className="hw-ai-changes-tags">
-                              {item.changes_applied.map((c, i) => (
-                                <span key={i} className="hw-change-tag">
-                                  ✓ {c}
-                                </span>
-                              ))}
+                  {attachedDocs.length === 0 ? (
+                    <div style={{ padding: '12px 14px', background: '#f8fafc', borderRadius: 8, fontSize: 12.5, color: '#64748b', display: 'flex', alignItems: 'center', gap: 8, border: '1px dashed #cbd5e1' }}>
+                      <FileText size={15} color="#94a3b8" />
+                      <span>No external medical documents or prescriptions uploaded during kiosk session.</span>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+                      {attachedDocs.map((doc, idx) => (
+                        <div
+                          key={idx}
+                          style={{
+                            background: '#ffffff',
+                            border: doc.isHandwritten ? '1.5px dashed #f59e0b' : '1.5px solid #10b981',
+                            borderRadius: 8,
+                            padding: 10,
+                            display: 'flex',
+                            gap: 12,
+                            alignItems: 'center',
+                          }}
+                        >
+                          <div
+                            onClick={() => setViewingDocModal(doc)}
+                            style={{
+                              width: 72,
+                              height: 72,
+                              flexShrink: 0,
+                              borderRadius: 6,
+                              overflow: 'hidden',
+                              cursor: 'pointer',
+                              border: '1px solid #cbd5e1',
+                              position: 'relative',
+                              background: '#0f172a',
+                            }}
+                            title="Click to view full-resolution image"
+                          >
+                            <img
+                              src={doc.url}
+                              alt="Medical report"
+                              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                            />
+                            <div
+                              style={{
+                                position: 'absolute',
+                                bottom: 0,
+                                left: 0,
+                                right: 0,
+                                background: 'rgba(15,23,42,0.75)',
+                                color: '#ffffff',
+                                fontSize: 9,
+                                textAlign: 'center',
+                                padding: '1px 0',
+                                fontWeight: 700,
+                              }}
+                            >
+                              Inspect
                             </div>
-                          )}
+                          </div>
+
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            {doc.isHandwritten ? (
+                              <div>
+                                <span
+                                  style={{
+                                    fontSize: 10,
+                                    fontWeight: 800,
+                                    background: '#fffbeb',
+                                    color: '#b45309',
+                                    border: '1px solid #fde68a',
+                                    padding: '2px 6px',
+                                    borderRadius: 4,
+                                    display: 'inline-block',
+                                    marginBottom: 3,
+                                  }}
+                                >
+                                  ⚠️ Not Extracted — Handwritten Document
+                                </span>
+                                <p style={{ margin: 0, fontSize: 10.5, color: '#78350f', lineHeight: 1.3 }}>
+                                  Astra OCR processes printed text only. Preserved for direct visual examination by attending doctor.
+                                </p>
+                              </div>
+                            ) : (
+                              <div>
+                                <span
+                                  style={{
+                                    fontSize: 10,
+                                    fontWeight: 800,
+                                    background: '#ecfdf5',
+                                    color: '#047857',
+                                    border: '1px solid #a7f3d0',
+                                    padding: '2px 6px',
+                                    borderRadius: 4,
+                                    display: 'inline-block',
+                                    marginBottom: 3,
+                                  }}
+                                >
+                                  ✓ Printed Text Extracted by Astra OCR
+                                </span>
+                                <p style={{ margin: 0, fontSize: 10.5, color: '#065f46', lineHeight: 1.3 }}>
+                                  {doc.structured_data?.report_type || 'Printed Report'} successfully parsed and mapped into symptom dossier.
+                                </p>
+                              </div>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => setViewingDocModal(doc)}
+                              style={{
+                                marginTop: 5,
+                                background: '#f8fafc',
+                                border: '1px solid #cbd5e1',
+                                borderRadius: 4,
+                                padding: '2px 8px',
+                                fontSize: 10.5,
+                                fontWeight: 600,
+                                color: '#0f172a',
+                                cursor: 'pointer',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 4,
+                              }}
+                            >
+                              <ExternalLink size={10} />
+                              <span>View Document</span>
+                            </button>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -1031,125 +1834,205 @@ export default function VerificationPage() {
                   )}
                 </div>
 
-                {/* ── Section: Candidate Diagnostic Hypotheses ── */}
-                <div className="hw-section">
-                  <h4 className="hw-section-title">
-                    <Stethoscope size={15} />
-                    <span>AI Diagnostic Hypotheses & Differential Matches</span>
-                  </h4>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {candidateConditions.length === 0 ? (
-                      <p style={{ fontSize: 12, color: '#64748b' }}>
-                        No specific differential diagnoses mapped yet.
-                      </p>
-                    ) : (
-                      candidateConditions.map((cond, idx) => (
+                {/* ── PRESENTING PATIENT SYMPTOMS (PURE SYMPTOM ROSTER) ── */}
+                <div className="hw-section" style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: 10, padding: 18, marginBottom: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <div style={{ width: 28, height: 28, borderRadius: 6, background: '#f1f5f9', border: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <Activity size={15} color="#0f172a" />
+                      </div>
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <h4 style={{ margin: 0, fontSize: 14, fontWeight: 800, color: '#0f172a', letterSpacing: '-0.2px' }}>
+                            Presenting Patient Symptoms
+                          </h4>
+                          <span style={{ fontSize: 10.5, fontWeight: 700, background: '#0f172a', color: '#ffffff', padding: '1px 7px', borderRadius: 10 }}>
+                            {allSymptoms.length} Reported
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 11, color: '#64748b', fontWeight: 500, marginTop: 2 }}>
+                          Validated symptom roster directly cataloged from patient consultation
+                        </div>
+                      </div>
+                    </div>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 700, color: '#047857', background: '#ecfdf5', border: '1px solid #a7f3d0', padding: '3px 9px', borderRadius: 14 }}>
+                      <CheckCircle2 size={12} color="#047857" /> Active Symptoms
+                    </span>
+                  </div>
+
+                  {allSymptoms.length === 0 ? (
+                    <div style={{ padding: '12px 14px', background: '#f8fafc', border: '1px dashed #cbd5e1', borderRadius: 6, fontSize: 12.5, color: '#64748b', display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <Activity size={14} color="#94a3b8" />
+                      <span>{selectedCase.chief_complaints || 'No specific presenting symptoms cataloged yet.'}</span>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                      {allSymptoms.map((symName, i) => (
                         <div
-                          key={idx}
+                          key={i}
                           style={{
-                            background: '#eff6ff',
-                            border: '1px solid #bfdbfe',
-                            borderRadius: 8,
-                            padding: '10px 14px',
+                            background: '#ffffff',
+                            border: '1.5px solid #0f172a',
+                            color: '#0f172a',
+                            padding: '6px 12px',
+                            borderRadius: 6,
+                            fontSize: 12.5,
+                            fontWeight: 700,
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 7,
+                            boxShadow: '0 1px 2px rgba(15,23,42,0.06)',
                           }}
                         >
-                          <div
+                          <span
                             style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'space-between',
-                              marginBottom: 4,
+                              background: '#0f172a',
+                              color: '#ffffff',
+                              fontSize: 10,
+                              fontWeight: 800,
+                              padding: '1px 5px',
+                              borderRadius: 3,
                             }}
                           >
-                            <strong style={{ fontSize: 13.5, color: '#1e40af' }}>
-                              {cond.condition}
-                            </strong>
-                            <span
-                              style={{
-                                fontSize: 11,
-                                fontWeight: 700,
-                                background: '#dbeafe',
-                                color: '#1e3a8a',
-                                padding: '2px 8px',
-                                borderRadius: 4,
-                              }}
-                            >
-                              Match: {cond.match_confidence || 'Moderate'}
-                            </span>
-                          </div>
-                          {cond.matching_rationale && (
-                            <p style={{ fontSize: 12, color: '#1e3a8a', margin: 0, opacity: 0.9 }}>
-                              {cond.matching_rationale}
-                            </p>
-                          )}
+                            #{i + 1}
+                          </span>
+                          <span>{symName}</span>
+                          <span
+                            style={{
+                              width: 6,
+                              height: 6,
+                              borderRadius: '50%',
+                              background: '#10b981',
+                              display: 'inline-block',
+                            }}
+                            title="Reported by patient"
+                          />
                         </div>
-                      ))
-                    )}
-                  </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
-                {/* ── Section: Clinical Symptoms Extracted ── */}
+                {/* ── SYMPTOM DEEP-DIVE CLINICAL ANALYSIS & TIMELINE ── */}
                 <div className="hw-section">
-                  <h4 className="hw-section-title">
-                    <Activity size={15} />
-                    <span>Extracted Symptoms</span>
-                  </h4>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {symptomsList.length === 0 ? (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                    <h4 className="hw-section-title" style={{ margin: 0 }}>
+                      <Clock size={15} />
+                      <span>Symptom Clinical Deep-Dive & Timeline Dossier</span>
+                    </h4>
+                    <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}>
+                      Timeline · Severity · Diurnal Variations (Evening Fever) · OCR Corroboration · Direct Patient Statements
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    {symptomsDeepDive.length === 0 ? (
                       <p style={{ fontSize: 12, color: '#64748b' }}>
                         No detailed symptom breakdown recorded yet.
                       </p>
                     ) : (
-                      symptomsList.map((sym, idx) => (
-                        <div
-                          key={idx}
-                          style={{
-                            background: '#f8fafc',
-                            border: '1px solid #e2e8f0',
-                            borderRadius: 8,
-                            padding: '10px 14px',
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'flex-start',
-                          }}
-                        >
-                          <div>
-                            <strong style={{ fontSize: 13, color: '#0f172a' }}>
-                              {sym.name}
-                            </strong>
-                            <div
-                              style={{
-                                fontSize: 11.5,
-                                color: '#64748b',
-                                marginTop: 3,
-                                display: 'flex',
-                                flexWrap: 'wrap',
-                                gap: 10,
-                              }}
-                            >
-                              {sym.duration && <span>Duration: {sym.duration}</span>}
-                              {sym.severity && <span>Severity: {sym.severity}</span>}
-                              {sym.location && <span>Location: {sym.location}</span>}
-                              {sym.pattern && <span>Pattern: {sym.pattern}</span>}
+                      symptomsDeepDive.map((sym, idx) => {
+                        const name = sym.name || `Symptom #${idx + 1}`
+                        const timeline = sym.timeline || sym.duration
+                        const depth = sym.depth_and_severity || sym.severity
+                        const diurnal = sym.timing_and_diurnal_pattern || sym.pattern
+                        const triggers = sym.triggers_and_relieving || sym.triggers
+                        const verbatim = sym.patient_disclosed_details
+                        const ocrMatch = sym.ocr_report_correlation || sym.report_correlation
+
+                        return (
+                          <div
+                            key={idx}
+                            style={{
+                              background: '#f8fafc',
+                              border: '1.5px solid #e2e8f0',
+                              borderRadius: 8,
+                              padding: '12px 14px',
+                            }}
+                          >
+                            {/* Symptom Title & Badges */}
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, borderBottom: '1px solid #e2e8f0', paddingBottom: 8 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: 11, fontWeight: 800, background: '#e2e8f0', color: '#0f172a', padding: '1px 6px', borderRadius: 4 }}>
+                                  #{idx + 1}
+                                </span>
+                                <strong style={{ fontSize: 14, color: '#0f172a' }}>{name}</strong>
+                              </div>
+                              {depth && (
+                                <span style={{ fontSize: 11, fontWeight: 700, background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', padding: '2px 8px', borderRadius: 4 }}>
+                                  Depth / Severity: {depth}
+                                </span>
+                              )}
                             </div>
-                            {sym.report_correlation && (
-                              <div
-                                style={{
-                                  fontSize: 11,
-                                  color: '#0369a1',
-                                  background: '#e0f2fe',
-                                  padding: '2px 6px',
-                                  borderRadius: 4,
-                                  marginTop: 4,
-                                  display: 'inline-block',
-                                }}
-                              >
-                                📄 Document match: {sym.report_correlation}
+
+                            {/* Deep-Dive Grid: Timeline, Diurnal, Triggers, Location */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8, marginBottom: 10 }}>
+                              <div style={{ background: '#ffffff', padding: '8px 10px', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+                                <div style={{ fontSize: 10.5, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', marginBottom: 2 }}>
+                                  ⏱️ Timeline & Progression
+                                </div>
+                                <div style={{ fontSize: 12, color: '#0f172a', fontWeight: 600 }}>
+                                  {timeline || 'Recorded during kiosk interrogation'}
+                                </div>
+                              </div>
+
+                              <div style={{ background: '#ffffff', padding: '8px 10px', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+                                <div style={{ fontSize: 10.5, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', marginBottom: 2 }}>
+                                  🌗 Diurnal Timing & Pattern
+                                </div>
+                                <div style={{ fontSize: 12, color: '#0f172a', fontWeight: 600 }}>
+                                  {diurnal || 'Present intermittently during daily routine'}
+                                </div>
+                              </div>
+
+                              <div style={{ background: '#ffffff', padding: '8px 10px', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+                                <div style={{ fontSize: 10.5, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', marginBottom: 2 }}>
+                                  ⚡ Aggravating & Relieving
+                                </div>
+                                <div style={{ fontSize: 12, color: '#0f172a', fontWeight: 500 }}>
+                                  {triggers || 'No external triggers reported'}
+                                </div>
+                              </div>
+
+                              {sym.location && (
+                                <div style={{ background: '#ffffff', padding: '8px 10px', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+                                  <div style={{ fontSize: 10.5, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', marginBottom: 2 }}>
+                                    📍 Anatomical Location
+                                  </div>
+                                  <div style={{ fontSize: 12, color: '#0f172a', fontWeight: 600 }}>
+                                    {sym.location}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Comprehensive Patient Disclosed Details */}
+                            {verbatim && (
+                              <div style={{ background: '#ffffff', border: '1px solid #cbd5e1', borderLeft: '3px solid #0f172a', borderRadius: 6, padding: '8px 12px', marginBottom: 8 }}>
+                                <div style={{ fontSize: 10.5, fontWeight: 800, color: '#0f172a', textTransform: 'uppercase', marginBottom: 3 }}>
+                                  🗣️ Everything Patient Disclosed During Interrogation:
+                                </div>
+                                <div style={{ fontSize: 12, color: '#1e293b', lineHeight: 1.45, fontStyle: 'italic' }}>
+                                  "{verbatim}"
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Corroborating OCR Evidence from Uploaded Report */}
+                            {ocrMatch && (
+                              <div style={{ background: '#f0fdf4', border: '1.5px solid #86efac', borderLeft: '4px solid #16a34a', borderRadius: 6, padding: '8px 12px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 800, color: '#166534', textTransform: 'uppercase', marginBottom: 2 }}>
+                                  <CheckCircle2 size={13} color="#16a34a" />
+                                  <span>Extracted from Uploaded Report (OCR Corroboration)</span>
+                                </div>
+                                <div style={{ fontSize: 12, color: '#14532d', fontWeight: 600 }}>
+                                  {ocrMatch.replace(/^Extracted from Uploaded Report:\s*/i, '')}
+                                </div>
                               </div>
                             )}
                           </div>
-                        </div>
-                      ))
+                        )
+                      })
                     )}
                   </div>
                 </div>
@@ -1443,6 +2326,8 @@ export default function VerificationPage() {
                   </button>
                 </div>
               </>
+            )}
+              </>
             ) : (
               <div style={{ textAlign: 'center', padding: '120px 24px', color: '#94a3b8' }}>
                 <Stethoscope size={48} style={{ margin: '0 auto 12px', opacity: 0.3 }} />
@@ -1450,13 +2335,562 @@ export default function VerificationPage() {
                   No Patient Selected
                 </h3>
                 <p style={{ fontSize: 13 }}>
-                  Select a box from the Emergency Queue or Normal Queue on the left to start review.
+                  Select a box from the Emergency, Normal, or External Referral Queue on the left to start review.
                 </p>
               </div>
             )}
           </div>
         </div>
       </div>
+
+      {/* ── Official Clinical Referral Slip Modal ── */}
+      {dispatchedSlipModal && lastDispatchedSlipData && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.85)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 120,
+            padding: 20,
+            backdropFilter: 'blur(4px)',
+          }}
+          onClick={() => setDispatchedSlipModal(false)}
+        >
+          <div
+            style={{
+              background: '#ffffff',
+              color: '#0f172a',
+              width: '740px',
+              maxWidth: '95vw',
+              maxHeight: '92vh',
+              overflowY: 'auto',
+              borderRadius: 14,
+              padding: '28px 32px',
+              boxShadow: '0 25px 60px rgba(0, 0, 0, 0.4)',
+              border: '2px solid #0f172a',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '2px solid #0f172a', paddingBottom: 14, marginBottom: 18 }}>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1, color: '#4338ca', textTransform: 'uppercase' }}>
+                  Astra Healthcare Network · Integrated Referral Radar
+                </div>
+                <h2 style={{ margin: '4px 0 0', fontSize: 19, fontWeight: 900, color: '#0f172a' }}>
+                  OFFICIAL CLINICAL TRANSFER & REFERRAL SLIP
+                </h2>
+              </div>
+              <button
+                onClick={() => setDispatchedSlipModal(false)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b' }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Demographics & Facility Grid */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, background: '#f8fafc', padding: 14, borderRadius: 8, border: '1px solid #e2e8f0', marginBottom: 16, fontSize: 12.5 }}>
+              <div>
+                <strong>Patient: </strong>{lastDispatchedSlipData.patient?.full_name} ({lastDispatchedSlipData.patient?.patient_id})
+              </div>
+              <div>
+                <strong>Age / Gender: </strong>{lastDispatchedSlipData.patient?.age} yrs / {lastDispatchedSlipData.patient?.gender}
+              </div>
+              <div>
+                <strong>Referring Doctor: </strong>Dr. {lastDispatchedSlipData.patient?.external_referral?.referring_doctor_name || 'Attending Physician'}
+              </div>
+              <div>
+                <strong>Target Facility: </strong>{lastDispatchedSlipData.facility?.name} ({lastDispatchedSlipData.facility?.distance_km} km away)
+              </div>
+              <div>
+                <strong>Facility Type: </strong>{lastDispatchedSlipData.facility?.hub_type}
+              </div>
+              <div>
+                <strong>Dispatched At: </strong>{new Date(lastDispatchedSlipData.dispatchedAt).toLocaleString()}
+              </div>
+            </div>
+
+            {/* Final Clinical Note */}
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', marginBottom: 6, color: '#0f172a' }}>
+                Clinical Referral Memorandum & Transport Protocols:
+              </div>
+              <pre style={{
+                background: '#f1f5f9',
+                padding: '14px 16px',
+                borderRadius: 8,
+                fontSize: 12,
+                lineHeight: 1.6,
+                whiteSpace: 'pre-wrap',
+                fontFamily: 'monospace',
+                color: '#0f172a',
+                margin: 0,
+                border: '1px solid #cbd5e1',
+              }}>
+                {lastDispatchedSlipData.note}
+              </pre>
+            </div>
+
+            {/* Footer Buttons */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, borderTop: '1px solid #e2e8f0', paddingTop: 16 }}>
+              <button
+                onClick={() => setDispatchedSlipModal(false)}
+                className="hw-btn-rescreen"
+              >
+                Close Slip
+              </button>
+              <button
+                onClick={() => window.print()}
+                className="hw-btn-doctor-dispatch"
+                style={{ background: '#0f172a', color: '#fff', padding: '9px 20px' }}
+              >
+                <Printer size={15} />
+                <span>Print Official Referral Slip</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Document Fullscreen Inspection Modal ── */}
+      {viewingDocModal && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.85)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 110,
+            padding: 20,
+          }}
+          onClick={() => setViewingDocModal(null)}
+        >
+          <div
+            style={{
+              background: '#ffffff',
+              color: '#0f172a',
+              width: '800px',
+              maxWidth: '95vw',
+              maxHeight: '92vh',
+              overflowY: 'auto',
+              borderRadius: 12,
+              padding: '24px 28px',
+              boxShadow: '0 25px 60px rgba(0, 0, 0, 0.4)',
+              border: '2px solid #0f172a',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1px solid #e2e8f0', paddingBottom: 12 }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: '#0f172a' }}>
+                  Medical Document Inspection & OCR Status
+                </h3>
+                <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+                  Patient: {selectedCase?.full_name} ({selectedCase?.patient_id})
+                </div>
+              </div>
+              <button
+                onClick={() => setViewingDocModal(null)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: 6,
+                  color: '#64748b',
+                }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Status Banner */}
+            <div style={{ marginBottom: 16 }}>
+              {viewingDocModal.isHandwritten ? (
+                <div style={{ background: '#fffbeb', border: '1.5px solid #fde68a', borderRadius: 8, padding: '12px 14px' }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 800, color: '#b45309', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <AlertTriangle size={15} color="#b45309" />
+                    <span>⚠️ Handwritten Document — Text Extraction Safely Bypassed</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#78350f', marginTop: 4, lineHeight: 1.4 }}>
+                    Astra OCR processes printed documents only. Handwritten prescriptions are preserved in original format for direct visual review by the doctor to eliminate AI transcription errors.
+                  </div>
+                </div>
+              ) : (
+                <div style={{ background: '#ecfdf5', border: '1.5px solid #a7f3d0', borderRadius: 8, padding: '12px 14px' }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 800, color: '#047857', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <CheckCircle2 size={15} color="#059669" />
+                    <span>✓ Printed Text Successfully Extracted by Astra OCR</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#065f46', marginTop: 4, lineHeight: 1.4 }}>
+                    PaddleOCR successfully parsed this printed report. Corroborating blood pressure, temperature, lab biomarkers, and existing prescriptions have been cross-mapped into the patient's symptom dossier.
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Document Image Preview */}
+            <div style={{ textAlign: 'center', background: '#0f172a', borderRadius: 8, padding: 14, marginBottom: 16 }}>
+              <img
+                src={viewingDocModal.url}
+                alt="Medical document"
+                style={{ maxWidth: '100%', maxHeight: '55vh', objectFit: 'contain', borderRadius: 4 }}
+              />
+            </div>
+
+            {/* Structured Report Findings */}
+            {viewingDocModal.structured_data && Object.keys(viewingDocModal.structured_data).length > 0 && (
+              <div style={{ background: '#f8fafc', padding: 14, borderRadius: 8, border: '1px solid #e2e8f0', fontSize: 12.5, marginBottom: 16 }}>
+                <strong style={{ display: 'block', marginBottom: 8, color: '#0f172a', textTransform: 'uppercase', fontSize: 11 }}>
+                  Parsed Report Attributes & Lab Values:
+                </strong>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 8 }}>
+                  {viewingDocModal.structured_data.report_type && (
+                    <div><strong>Type: </strong>{viewingDocModal.structured_data.report_type}</div>
+                  )}
+                  {viewingDocModal.structured_data.doctor_name && (
+                    <div><strong>Doctor: </strong>{viewingDocModal.structured_data.doctor_name}</div>
+                  )}
+                  {viewingDocModal.structured_data.facility_name && (
+                    <div><strong>Facility: </strong>{viewingDocModal.structured_data.facility_name}</div>
+                  )}
+                  {viewingDocModal.structured_data.document_date && (
+                    <div><strong>Date: </strong>{viewingDocModal.structured_data.document_date}</div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div style={{ textAlign: 'right', display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <a
+                href={viewingDocModal.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hw-btn-rescreen"
+                style={{ background: '#ffffff', color: '#0f172a', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+              >
+                <ExternalLink size={13} />
+                <span>Open Original Image</span>
+              </a>
+              <button
+                type="button"
+                onClick={() => setViewingDocModal(null)}
+                className="hw-btn-rescreen"
+                style={{ background: '#0f172a', color: '#ffffff', borderColor: '#0f172a' }}
+              >
+                Close Viewer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Slide-Over AI Assistant & Patient Interrogation Drawer ── */}
+      {isAiDrawerOpen && selectedCase && (
+        <div
+          className="hw-ai-drawer-overlay"
+          onClick={() => setIsAiDrawerOpen(false)}
+        >
+          <div
+            className="hw-ai-drawer"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Drawer Header */}
+            <div className="hw-ai-drawer-header">
+              <div className="hw-ai-drawer-title">
+                <div style={{ width: 34, height: 34, borderRadius: 8, background: '#0f172a', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Sparkles size={17} />
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>Case AI Co-Pilot & Patient Dialogue</h3>
+                  <div style={{ fontSize: 11.5, color: '#64748b', fontWeight: 600 }}>
+                    {selectedCase.full_name} ({selectedCase.patient_id})
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAiDrawerOpen(false)}
+                className="hw-ai-drawer-close-btn"
+                title="Close Assistant"
+              >
+                <X size={19} />
+              </button>
+            </div>
+
+            {/* Drawer Navigation Tabs */}
+            <div className="hw-ai-drawer-tabs">
+              <button
+                type="button"
+                className={`hw-ai-drawer-tab ${drawerActiveTab === 'rag' ? 'active' : ''}`}
+                onClick={() => setDrawerActiveTab('rag')}
+              >
+                <Sparkles size={13} />
+                <span>Interrogation Q&A (RAG)</span>
+              </button>
+              <button
+                type="button"
+                className={`hw-ai-drawer-tab ${drawerActiveTab === 'chat' ? 'active' : ''}`}
+                onClick={() => setDrawerActiveTab('chat')}
+              >
+                <Bot size={13} />
+                <span>Report Co-Pilot</span>
+              </button>
+              <button
+                type="button"
+                className={`hw-ai-drawer-tab ${drawerActiveTab === 'interrogation' ? 'active' : ''}`}
+                onClick={() => setDrawerActiveTab('interrogation')}
+              >
+                <FileText size={13} />
+                <span>Transcript</span>
+              </button>
+            </div>
+
+            {/* Drawer Content */}
+            {drawerActiveTab === 'rag' ? (
+              <div className="hw-ai-drawer-body">
+                <div className="hw-ai-drawer-hint">
+                  💬 <strong>RAG Interrogation Chatbot:</strong> Ask any question regarding {selectedCase.full_name}'s live kiosk conversation. The system retrieves real question-and-answer turns from <code>astra-conversation</code> vector database and quotes exact dialogue and timing.
+                </div>
+
+                {/* Suggestion Chips */}
+                <div className="hw-ai-drawer-chips">
+                  <button
+                    type="button"
+                    className="hw-drawer-chip"
+                    onClick={() => handleSendRagQuery('What did the patient say about fever timing and evening chills?')}
+                  >
+                    ❓ Fever timing & chills?
+                  </button>
+                  <button
+                    type="button"
+                    className="hw-drawer-chip"
+                    onClick={() => handleSendRagQuery('Did the patient disclose any chest pain or radiating discomfort?')}
+                  >
+                    ❓ Any chest pain or radiation?
+                  </button>
+                  <button
+                    type="button"
+                    className="hw-drawer-chip"
+                    onClick={() => handleSendRagQuery('What medications and chronic conditions does the patient take?')}
+                  >
+                    ❓ Medications & chronic history?
+                  </button>
+                  <button
+                    type="button"
+                    className="hw-drawer-chip"
+                    onClick={() => handleSendRagQuery('How long have the symptoms lasted and what makes them worse or better?')}
+                  >
+                    ❓ Duration & triggers?
+                  </button>
+                </div>
+
+                {/* Chat Message Stream */}
+                <div className="hw-chat-thread" ref={ragChatScrollRef}>
+                  {ragHistory.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '36px 16px', color: '#64748b' }}>
+                      <Bot size={36} style={{ margin: '0 auto 10px', opacity: 0.4 }} />
+                      <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>
+                        Interrogation Q&A Ready for {selectedCase.full_name}
+                      </div>
+                      <div style={{ fontSize: 12, marginTop: 4, lineHeight: 1.4 }}>
+                        Ask questions about the patient's real kiosk dialogue, question timings, symptoms, or disclosures.
+                      </div>
+                    </div>
+                  ) : (
+                    ragHistory.map((item, idx) => (
+                      <div key={item.id || idx} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <div className="hw-chat-msg-worker">
+                          {item.message}
+                        </div>
+                        <div className="hw-chat-msg-ai">
+                          <div
+                            style={{
+                              lineHeight: 1.65,
+                              fontSize: 13,
+                              whiteSpace: 'pre-line',
+                              color: '#0f172a',
+                            }}
+                          >
+                            {item.ai_reply}
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                {/* Footer Input Bar */}
+                <div className="hw-ai-drawer-footer">
+                  <input
+                    type="text"
+                    className="hw-drawer-input"
+                    placeholder="Ask about patient's interrogation disclosures..."
+                    value={ragMessage}
+                    onChange={(e) => setRagMessage(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleSendRagQuery()
+                    }}
+                    disabled={isRagProcessing}
+                  />
+                  <button
+                    type="button"
+                    className="hw-drawer-send-btn"
+                    onClick={() => handleSendRagQuery()}
+                    disabled={isRagProcessing || !ragMessage.trim()}
+                  >
+                    {isRagProcessing ? (
+                      <RefreshCw size={14} className="animate-spin" />
+                    ) : (
+                      <>
+                        <Send size={13} />
+                        <span>Ask</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            ) : drawerActiveTab === 'chat' ? (
+              <div className="hw-ai-drawer-body">
+                <div className="hw-ai-drawer-hint">
+                  💬 <strong>Ask or Instruct:</strong> Ask what {selectedCase.full_name} stated during interrogation (e.g. <em>"What did patient say about evening fever?"</em>), or type natural instructions to adjust vitals, symptoms, or priority.
+                </div>
+
+                {/* Suggestion Chips */}
+                <div className="hw-ai-drawer-chips">
+                  <button
+                    type="button"
+                    className="hw-drawer-chip"
+                    onClick={() => handleSendAiUpdate('What did the patient say about fever timing and evening chills?')}
+                  >
+                    ❓ Fever timing & chills?
+                  </button>
+                  <button
+                    type="button"
+                    className="hw-drawer-chip"
+                    onClick={() => handleSendAiUpdate('Patient has mild dry cough for 3 days, add to symptoms')}
+                  >
+                    + Add dry cough (3d)
+                  </button>
+                  <button
+                    type="button"
+                    className="hw-drawer-chip"
+                    onClick={() => handleSendAiUpdate('Measured BP again: 135/85 mmHg, update vitals')}
+                  >
+                    + Update BP to 135/85
+                  </button>
+                  <button
+                    type="button"
+                    className="hw-drawer-chip"
+                    onClick={() => handleSendAiUpdate('Escalate priority to Emergency due to increasing chest tightness')}
+                  >
+                    🚨 Escalate to Emergency
+                  </button>
+                </div>
+
+                {/* Chat Message Stream */}
+                <div className="hw-chat-thread" ref={aiChatScrollRef}>
+                  {aiFeedbackHistory.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '36px 16px', color: '#64748b' }}>
+                      <Bot size={36} style={{ margin: '0 auto 10px', opacity: 0.4 }} />
+                      <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>
+                        Ready to Assist with {selectedCase.full_name}
+                      </div>
+                      <div style={{ fontSize: 12, marginTop: 4, lineHeight: 1.4 }}>
+                        Ask questions about the patient's triage interview or give instructions to modify clinical parameters.
+                      </div>
+                    </div>
+                  ) : (
+                    aiFeedbackHistory.map((item, idx) => (
+                      <div key={item.id || idx} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <div className="hw-chat-msg-worker">
+                          {item.message || item.worker_message}
+                        </div>
+                        <div className="hw-chat-msg-ai">
+                          <div>{item.ai_reply}</div>
+                          {item.changes_applied && item.changes_applied.length > 0 && (
+                            <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                              {item.changes_applied.map((c, i) => (
+                                <span key={i} className="hw-chat-changes-badge">
+                                  ✓ {c}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                {/* Footer Input Bar */}
+                <div className="hw-ai-drawer-footer">
+                  <input
+                    type="text"
+                    className="hw-drawer-input"
+                    placeholder="Ask about patient or type instructions (e.g. 'Add fever for 2 days')..."
+                    value={aiMessage}
+                    onChange={(e) => setAiMessage(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleSendAiUpdate()
+                    }}
+                    disabled={isAiProcessing}
+                  />
+                  <button
+                    type="button"
+                    className="hw-drawer-send-btn"
+                    onClick={() => handleSendAiUpdate()}
+                    disabled={isAiProcessing || !aiMessage.trim()}
+                  >
+                    {isAiProcessing ? (
+                      <RefreshCw size={14} className="animate-spin" />
+                    ) : (
+                      <>
+                        <Send size={13} />
+                        <span>Send</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="hw-ai-drawer-body">
+                <div className="hw-ai-drawer-hint">
+                  🗣️ <strong>Kiosk Interrogation Transcript:</strong> Verbatim answers and clinical dialogue captured during {selectedCase.full_name}'s session at the Astra Kiosk.
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {(() => {
+                    const turns = getInterrogationTurns(selectedCase)
+                    if (turns.length === 0) {
+                      return (
+                        <div style={{ textAlign: 'center', padding: '30px', color: '#64748b', fontSize: 13 }}>
+                          No dialogue turns recorded.
+                        </div>
+                      )
+                    }
+                    return turns.map((t, idx) => (
+                      <div key={idx} className="hw-dialogue-card">
+                        <div className="hw-dialogue-q">
+                          <span>Q{idx + 1}: {t.question || 'Interrogation Inquiry'}</span>
+                        </div>
+                        <div className="hw-dialogue-a">
+                          "{t.answer || t.patient_answer_en || t.patient_answer || 'No response recorded'}"
+                        </div>
+                      </div>
+                    ))
+                  })()}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </WorkerLayout>
   )
 }

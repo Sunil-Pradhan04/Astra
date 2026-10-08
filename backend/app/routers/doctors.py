@@ -12,15 +12,24 @@ def _is_actually_online(entity) -> bool:
         return False
     return datetime.utcnow() - entity.last_seen_at < timedelta(minutes=ONLINE_TIMEOUT_MINUTES)
 
+from pydantic import BaseModel
 from app.models.admin import Admin
 from app.models.care_hub import CareHub
 from app.models.doctor import Doctor
 from app.models.patient import Patient
 from app.schemas.staff import DoctorCreate, DoctorOut, DoctorCreatedResponse
-from app.schemas.patient import DoctorPrescriptionSubmitRequest, PatientOut
+from app.schemas.patient import (
+    DoctorPrescriptionSubmitRequest,
+    PatientOut,
+    InternalReferralRequest,
+    GenerateReferralNoteRequest,
+    ExternalReferralDoctorRequest,
+)
 from app.dependencies.auth import get_current_admin, get_current_doctor
 from app.core.security import hash_password, generate_id, generate_password
 from app.services.email_service import send_email, staff_credentials_email, patient_prescription_email
+from app.services.conversation_rag_service import conversation_rag
+from app.services.health_worker_ai_service import health_worker_ai
 
 router = APIRouter(prefix="/doctors", tags=["Doctors"])
 
@@ -391,3 +400,247 @@ async def doctor_heartbeat(doctor: Doctor = Depends(get_current_doctor)):
     doctor.last_seen_at = datetime.utcnow()
     await doctor.save()
     return {"status": "ok", "doctor_id": doctor.doctor_id}
+
+
+class DoctorInterrogationChatRequest(BaseModel):
+    query: str
+    user_name: Optional[str] = None
+
+
+@router.post("/desk/{patient_id}/chat-interrogation")
+async def doctor_chat_patient_interrogation(
+    patient_id: str,
+    data: DoctorInterrogationChatRequest,
+    doctor: Doctor = Depends(get_current_doctor),
+):
+    """
+    RAG-powered clinical chatbot for attending doctors. Answers clinical queries about
+    what the patient actually disclosed during autonomous kiosk interrogation by querying
+    Pinecone vector index 'astra-conversation' (1536 dim, cosine similarity).
+    """
+    res = await conversation_rag.answer_doctor_query(
+        patient_id=patient_id,
+        query=data.query,
+        doctor_name=doctor.full_name,
+    )
+    return res
+
+
+# ── Clinical Referral Endpoints ─────────────────────────────────────────────
+
+@router.get("/internal-doctors")
+async def get_internal_doctors(doctor: Doctor = Depends(get_current_doctor)):
+    """
+    Returns all registered doctors in the same hospital/care hub with their real-time waiting queue counts.
+    Used for doctor-to-doctor internal referral.
+    """
+    hub_id = doctor.care_hub_id
+    if not hub_id:
+        raise HTTPException(400, "Doctor has no Care Hub assigned")
+
+    doctors = await Doctor.find(Doctor.care_hub_id == hub_id).to_list()
+
+    # Load active patients waiting for doctor consultation in this care hub
+    waiting_patients = await Patient.find(
+        Patient.care_hub_id == hub_id,
+        Patient.status == "verified_for_doctor"
+    ).to_list()
+
+    doc_map = {}
+    for p in waiting_patients:
+        did = getattr(p, "assigned_doctor_id", None)
+        if did:
+            doc_map[did] = doc_map.get(did, 0) + 1
+
+    result = []
+    for d in doctors:
+        role = getattr(d, "role", "medicine_specialist")
+        role_label = {
+            "intern_doctor": "Intern Doctor",
+            "medicine_specialist": "Medicine Specialist",
+            "specialist": "Specialist",
+        }.get(role, role)
+
+        result.append({
+            "doctor_id": d.doctor_id,
+            "full_name": d.full_name,
+            "role": role,
+            "role_label": role_label,
+            "specialization": d.specialization or "General Medicine",
+            "is_online": _is_actually_online(d),
+            "waiting_patients": doc_map.get(d.doctor_id, 0),
+            "is_self": d.doctor_id == doctor.doctor_id,
+        })
+
+    return {
+        "doctors": result,
+        "care_hub_id": hub_id,
+        "total": len(result),
+    }
+
+
+@router.post("/desk/refer-internal/{patient_id}")
+async def refer_patient_internal(
+    patient_id: str,
+    data: InternalReferralRequest,
+    doctor: Doctor = Depends(get_current_doctor),
+):
+    """
+    Refers a patient to another doctor within the same hospital, immediately
+    transferring the patient to the target doctor's queue with referral notes.
+    """
+    patient = await Patient.find_one(Patient.patient_id == patient_id)
+    if not patient:
+        raise HTTPException(404, f"Patient {patient_id} not found")
+
+    target_doctor = await Doctor.find_one(Doctor.doctor_id == data.target_doctor_id)
+    if not target_doctor:
+        raise HTTPException(404, f"Target doctor {data.target_doctor_id} not found")
+
+    if target_doctor.care_hub_id != doctor.care_hub_id:
+        raise HTTPException(400, "Target doctor must be in the same hospital facility")
+
+    # Update patient assignment
+    patient.assigned_doctor_id = target_doctor.doctor_id
+    patient.assigned_doctor_name = target_doctor.full_name
+    patient.assigned_doctor_role = getattr(target_doctor, "role", "specialist")
+    patient.status = "verified_for_doctor"
+
+    if data.priority:
+        patient.priority = data.priority
+        if data.priority.lower() == "emergency":
+            patient.urgency_level = "red"
+            patient.urgency_detected = True
+
+    referral_record = {
+        "from_doctor_id": doctor.doctor_id,
+        "from_doctor_name": doctor.full_name,
+        "to_doctor_id": target_doctor.doctor_id,
+        "to_doctor_name": target_doctor.full_name,
+        "to_doctor_role": getattr(target_doctor, "role", "specialist"),
+        "to_doctor_specialization": target_doctor.specialization or "General Medicine",
+        "reason": data.reason,
+        "notes": data.notes,
+        "priority": data.priority or getattr(patient, "priority", "normal"),
+        "referred_at": datetime.utcnow().isoformat(),
+    }
+    patient.internal_referral = referral_record
+
+    note_entry = f"[Internal Referral from Dr. {doctor.full_name} -> Dr. {target_doctor.full_name}]: {data.reason}"
+    if data.notes:
+        note_entry += f" | Notes: {data.notes}"
+    if patient.clinical_notes:
+        patient.clinical_notes = f"{patient.clinical_notes}\n{note_entry}"
+    else:
+        patient.clinical_notes = note_entry
+
+    patient.updated_at = datetime.utcnow()
+    await patient.save()
+
+    return {
+        "success": True,
+        "message": f"Patient {patient.full_name} successfully transferred to Dr. {target_doctor.full_name}'s queue",
+        "patient": patient,
+    }
+
+
+@router.post("/desk/generate-referral-note/{patient_id}")
+async def generate_patient_referral_note(
+    patient_id: str,
+    data: GenerateReferralNoteRequest,
+    doctor: Doctor = Depends(get_current_doctor),
+):
+    """
+    Uses Sarvam AI LLM to automatically synthesize an official clinical referral memorandum
+    based on the doctor's reason for referral and possible diagnosis.
+    """
+    patient = await Patient.find_one(Patient.patient_id == patient_id)
+    if not patient:
+        raise HTTPException(404, f"Patient {patient_id} not found")
+
+    hub = None
+    if doctor.care_hub_id:
+        hub = await CareHub.get(doctor.care_hub_id)
+
+    hub_name = hub.name if hub else "Astra Care Hub Facility"
+
+    p_dict = patient.model_dump() if hasattr(patient, "model_dump") else patient.dict()
+
+    referral_note = await health_worker_ai.generate_referral_note(
+        patient_data=p_dict,
+        reason_for_referral=data.reason_for_referral,
+        possible_diagnosis=data.possible_diagnosis,
+        referring_doctor_name=doctor.full_name,
+        referring_facility_name=hub_name,
+        urgency=data.urgency or "Urgent",
+        clinical_notes=data.clinical_notes,
+    )
+
+    return {
+        "success": True,
+        "ai_referral_note": referral_note,
+        "urgency": data.urgency,
+        "reason_for_referral": data.reason_for_referral,
+        "possible_diagnosis": data.possible_diagnosis,
+        "referring_facility_name": hub_name,
+        "referring_doctor_name": doctor.full_name,
+    }
+
+
+@router.post("/desk/refer-external/{patient_id}")
+async def refer_patient_external(
+    patient_id: str,
+    data: ExternalReferralDoctorRequest,
+    doctor: Doctor = Depends(get_current_doctor),
+):
+    """
+    Submits an external referral note created by the doctor. The case is routed into the
+    Mid-Level Health Worker review queue ('pending_external_referral') to select destination
+    facility in radius and dispatch.
+    """
+    patient = await Patient.find_one(Patient.patient_id == patient_id)
+    if not patient:
+        raise HTTPException(404, f"Patient {patient_id} not found")
+
+    hub = None
+    if doctor.care_hub_id:
+        hub = await CareHub.get(doctor.care_hub_id)
+
+    hub_name = hub.name if hub else "Current Care Hub"
+
+    external_ref_record = {
+        "referring_doctor_id": doctor.doctor_id,
+        "referring_doctor_name": doctor.full_name,
+        "referring_doctor_role": getattr(doctor, "role", "Doctor"),
+        "referring_care_hub_id": doctor.care_hub_id,
+        "referring_care_hub_name": hub_name,
+        "reason_for_referral": data.reason_for_referral,
+        "possible_diagnosis": data.possible_diagnosis,
+        "urgency": data.urgency,
+        "ai_referral_note": data.ai_referral_note,
+        "updated_referral_note": data.ai_referral_note,
+        "doctor_notes": data.clinical_notes,
+        "created_at": datetime.utcnow().isoformat(),
+        "status": "pending_worker_review",
+    }
+
+    patient.status = "pending_external_referral"
+    patient.external_referral = external_ref_record
+
+    note_entry = (
+        f"[External Referral Initiated by Dr. {doctor.full_name}]: "
+        f"Diagnosis: {data.possible_diagnosis} | Reason: {data.reason_for_referral}"
+    )
+    if patient.clinical_notes:
+        patient.clinical_notes = f"{patient.clinical_notes}\n{note_entry}"
+    else:
+        patient.clinical_notes = note_entry
+
+    patient.updated_at = datetime.utcnow()
+    await patient.save()
+
+    return {
+        "success": True,
+        "message": "Referral note submitted. Patient sent to Health Worker queue for facility selection and dispatch.",
+        "patient": patient,
+    }

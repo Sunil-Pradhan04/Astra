@@ -15,8 +15,11 @@ from app.schemas.patient import (
     PatientVerifyToDoctorRequest,
     PatientRescreenRequest,
     AiUpdateResponse,
+    ExternalReferralDispatchWorkerRequest,
 )
 from app.services.health_worker_ai_service import health_worker_ai
+from app.services.conversation_rag_service import conversation_rag
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/patients", tags=["Patients & Queue"])
 
@@ -104,11 +107,26 @@ async def get_grouped_patient_queues(
     # Cases already verified and waiting for Doctor
     doctor_list = [p for p in all_patients if getattr(p, "status", "") == "verified_for_doctor"]
 
+    # External referral cases waiting for Mid-Level Health Worker review & facility dispatch
+    external_referral_list = [
+        p for p in all_patients
+        if getattr(p, "status", "") == "pending_external_referral"
+    ]
+
+    # Excluded statuses from general pending intake queue
+    excluded_statuses = [
+        "verified_for_doctor",
+        "completed",
+        "queued_for_ai",
+        "pending_external_referral",
+        "referred_external",
+    ]
+
     # Emergency cases needing mid-level worker review:
-    # Priority is emergency or urgency_detected is true, and not yet verified for doctor or completed
+    # Priority is emergency or urgency_detected is true, and not yet verified for doctor or completed or external referral
     emergency_list = [
         p for p in all_patients
-        if p.status not in ["verified_for_doctor", "completed", "queued_for_ai"]
+        if p.status not in excluded_statuses
         and (getattr(p, "priority", "normal") == "emergency" or getattr(p, "urgency_detected", False) or getattr(p, "status", "") == "emergency_queue")
     ]
 
@@ -116,7 +134,7 @@ async def get_grouped_patient_queues(
     # Status is pending_verification and not in emergency list
     normal_list = [
         p for p in all_patients
-        if p.status not in ["verified_for_doctor", "completed", "queued_for_ai"]
+        if p.status not in excluded_statuses
         and p not in emergency_list
     ]
 
@@ -124,10 +142,12 @@ async def get_grouped_patient_queues(
         "emergency_queue": emergency_list,
         "normal_queue": normal_list,
         "doctor_queue": doctor_list,
+        "external_referral_queue": external_referral_list,
         "emergency_count": len(emergency_list),
         "normal_count": len(normal_list),
         "doctor_count": len(doctor_list),
-        "total_pending_count": len(emergency_list) + len(normal_list),
+        "external_referral_count": len(external_referral_list),
+        "total_pending_count": len(emergency_list) + len(normal_list) + len(external_referral_list),
         "total_count": len(all_patients),
     }
 
@@ -238,15 +258,9 @@ async def ai_update_patient_report(
             existing_notes = structured.get("clinical_notes", "")
             structured["clinical_notes"] = f"{existing_notes} | {updated_fields['clinical_notes']}".strip(" |")
 
-        if updated_fields.get("candidate_conditions"):
-            structured["candidate_conditions"] = updated_fields["candidate_conditions"]
-
-        if updated_fields.get("medications_and_history"):
-            structured["medications_and_history"] = updated_fields["medications_and_history"]
-
         # Handle symptoms added or modified
         if updated_fields.get("symptoms_added_or_modified"):
-            existing_symptoms = structured.get("symptoms", [])
+            existing_symptoms = structured.get("symptoms_deep_dive") or structured.get("symptoms", [])
             for sym in updated_fields["symptoms_added_or_modified"]:
                 # Check if already present by name
                 sym_name = sym.get("name", "").lower()
@@ -259,14 +273,22 @@ async def ai_update_patient_report(
                 if not matched:
                     existing_symptoms.append(sym)
             structured["symptoms"] = existing_symptoms
+            structured["symptoms_deep_dive"] = existing_symptoms
+            structured["all_symptoms_overview"] = [s.get("name") for s in existing_symptoms if s.get("name")]
 
         # Handle symptoms removed
         if updated_fields.get("symptoms_removed"):
             rem_names = [r.lower() for r in updated_fields["symptoms_removed"]]
-            structured["symptoms"] = [
-                s for s in structured.get("symptoms", [])
+            existing_symptoms = [
+                s for s in (structured.get("symptoms_deep_dive") or structured.get("symptoms", []))
                 if s.get("name", "").lower() not in rem_names
             ]
+            structured["symptoms"] = existing_symptoms
+            structured["symptoms_deep_dive"] = existing_symptoms
+            structured["all_symptoms_overview"] = [s.get("name") for s in existing_symptoms if s.get("name")]
+
+        if updated_fields.get("medications_and_history"):
+            structured["medications_and_history"] = updated_fields["medications_and_history"]
 
         if "structured_summary" in current_ai_sum:
             current_ai_sum["structured_summary"] = structured
@@ -367,4 +389,77 @@ async def get_patient_detail(patient_id: str):
     if not patient:
         raise HTTPException(404, f"Patient {patient_id} not found")
     return patient
+
+
+class WorkerInterrogationChatRequest(BaseModel):
+    query: str
+    user_name: Optional[str] = None
+
+
+@router.post("/{patient_id}/chat-interrogation")
+async def worker_chat_patient_interrogation(
+    patient_id: str,
+    data: WorkerInterrogationChatRequest,
+):
+    """
+    RAG Chatbot for Verification Desk health workers and clinicians.
+    Answers inquiries regarding patient's actual interrogation dialogue turns
+    retrieved from Pinecone vector index 'astra-conversation' (1536 dim, cosine similarity).
+    """
+    res = await conversation_rag.answer_doctor_query(
+        patient_id=patient_id,
+        query=data.query,
+        doctor_name=data.user_name or "Verification Health Worker",
+    )
+    return res
+
+
+@router.post("/{patient_id}/dispatch-external-referral")
+async def dispatch_external_referral(
+    patient_id: str,
+    data: ExternalReferralDispatchWorkerRequest,
+):
+    """
+    Health Worker completes review of external referral, selects target facility from radius radar,
+    finalizes referral notes with transport instructions, and dispatches the patient.
+    Status moves to 'referred_external'.
+    """
+    patient = await Patient.find_one(Patient.patient_id == patient_id)
+    if not patient:
+        raise HTTPException(404, f"Patient {patient_id} not found")
+
+    ext_ref = patient.external_referral or {}
+    ext_ref["target_care_hub_id"] = data.target_care_hub_id
+    ext_ref["target_care_hub_name"] = data.target_care_hub_name
+    ext_ref["target_care_hub_type"] = data.target_care_hub_type
+    ext_ref["target_care_hub_distance_km"] = data.target_care_hub_distance_km
+    ext_ref["final_referral_note"] = data.updated_referral_note
+    ext_ref["updated_referral_note"] = data.updated_referral_note
+    ext_ref["dispatched_by_worker_id"] = data.worker_id or "HW-VERIFIER"
+    ext_ref["dispatched_by_worker_name"] = data.worker_name or "Mid-Level Health Worker"
+    ext_ref["dispatched_at"] = datetime.utcnow().isoformat()
+    ext_ref["status"] = "dispatched"
+
+    patient.external_referral = ext_ref
+    patient.status = "referred_external"
+
+    note_entry = (
+        f"[External Referral Dispatched]: Target -> {data.target_care_hub_name} "
+        f"({data.target_care_hub_type or 'Hospital'}, {data.target_care_hub_distance_km or '—'} km). "
+        f"Dispatched by {data.worker_name or 'Health Worker'}."
+    )
+    if patient.clinical_notes:
+        patient.clinical_notes = f"{patient.clinical_notes}\n{note_entry}"
+    else:
+        patient.clinical_notes = note_entry
+
+    patient.updated_at = datetime.utcnow()
+    await patient.save()
+
+    return {
+        "success": True,
+        "message": f"Referral successfully dispatched to {data.target_care_hub_name}.",
+        "patient": patient,
+    }
+
 

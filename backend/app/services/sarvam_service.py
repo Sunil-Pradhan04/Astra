@@ -213,11 +213,18 @@ class SarvamAIService:
         # Fallback to returning original text if LLM call fails
         return text.strip()
 
-    async def generate_primary_question(self, question_number: int, lang_key: str) -> Dict[str, str]:
+    async def generate_primary_question(
+        self,
+        question_number: int,
+        lang_key: str,
+        stated_symptoms: Optional[str] = None,
+        stated_symptoms_native: Optional[str] = None,
+    ) -> Dict[str, str]:
         """
         Dynamically generates the primary 2 starting questions using Sarvam LLM:
-        - Stored in ENGLISH for clinical memory ledger.
-        - Spoken/displayed in patient's preferred language (Hindi, English, Odia).
+        - Q1 asks the patient to explain symptoms clearly and deeply.
+        - Q2 interactively acknowledges the symptoms stated in Q1 and asks if they
+          are facing any other problems, symptoms, or discomfort.
         """
         meta = get_lang_meta(lang_key)
         lang_name = meta["name"]
@@ -228,11 +235,19 @@ class SarvamAIService:
             q_en = "Please explain about your symptoms clearly and deeply."
             system_content = PRIMARY_QUESTION_1_SYSTEM
         else:
-            intent = "Did you miss something? Please give more details of what you are feeling and explain your problem"
-            q_en = "Did you miss something? Please give more details of what you are feeling and explain your problem."
+            intent = "Acknowledge stated symptoms and inquire if patient faces any other problems or discomfort"
+            if stated_symptoms:
+                q_en = f"You mentioned that you are having {stated_symptoms}. Besides these, are you facing any other problems, pain, or discomfort? If yes, please tell me."
+            else:
+                q_en = "Thank you for sharing your symptoms. Besides what you mentioned, are you facing any other problems, pain, or discomfort? If yes, please tell me."
             system_content = PRIMARY_QUESTION_2_SYSTEM
 
-        prompt_instruction = build_primary_question_prompt(question_number, lang_name, q_en)
+        prompt_instruction = build_primary_question_prompt(
+            question_number,
+            lang_name,
+            q_en,
+            stated_symptoms=stated_symptoms
+        )
 
         localized_text = None
         if lang_code == "en-IN":
@@ -262,6 +277,9 @@ class SarvamAIService:
                     print(f"[SarvamService] Error generating primary Q{question_number}: {e}")
 
         # High-quality fallback phrases if network glitch occurs
+        sym_desc = stated_symptoms_native or stated_symptoms or "अपनी समस्या"
+        sym_desc_od = stated_symptoms_native or stated_symptoms or "ଲକ୍ଷଣ"
+        sym_desc_en = stated_symptoms or "these symptoms"
         fallbacks = {
             1: {
                 "hi-IN": "कृपया अपने लक्षणों के बारे में विस्तार और स्पष्ट रूप से बताएं।",
@@ -277,17 +295,17 @@ class SarvamAIService:
                 "en-IN": "Please explain about your symptoms clearly and deeply.",
             },
             2: {
-                "hi-IN": "क्या कुछ छूट गया? कृपया थोड़ा और बताएं कि आप कैसा महसूस कर रहे हैं और क्या समस्या है?",
-                "ta-IN": "ஏதேனும் விடுபட்டுள்ளதா? நீங்கள் எவ்வாறு உணர்கிறீர்கள் என்பதை மேலும் விரிவாகக் கூறுங்கள்.",
-                "te-IN": "ఏదైనా మిస్ అయ్యిందా? మీరు ఎలా భావిస్తున్నారో మరింత వివరంగా చెప్పండి.",
-                "bn-IN": "কিছু কি বাদ পড়েছে? আপনি কেমন অনুভব করছেন তা আরও বিস্তারিতভাবে বলুন।",
-                "ml-IN": "എന്തെങ്കിലും വിട്ടുപോയോ? നിങ്ങളുടെ അസ്വസ്ഥതകളെക്കുറിച്ച് കൂടുതൽ വിശദീകരിക്കുക.",
-                "mr-IN": "काही राहून गेले आहे का? आपण काय अनुभवत आहात ते अधिक सविस्तरपणे सांगा.",
-                "gu-IN": "કંઈ છૂટી ગયું છે? તમે કેવું અનુભવી રહ્યા છો તે વિશે વધુ વિગતો આપો.",
-                "kn-IN": "ಏನಾದರೂ ತಪ್ಪಿಹೋಗಿದೆಯೇ? ನೀವು ಹೇಗನಿಸುತ್ತಿದ್ದೀರಿ ಎಂಬುದನ್ನು ಹೆಚ್ಚು ವಿವರವಾಗಿ ವಿವರಿಸಿ.",
-                "pa-IN": "ਕੀ ਕੁਝ ਰਹਿ ਗਿਆ? ਕਿਰਪਾ ਕਰਕੇ ਹੋਰ ਦੱਸੋ ਕਿ ਤੁਸੀਂ ਕਿਵੇਂ ਮਹਿਸੂਸ ਕਰ ਰਹੇ ਹੋ।",
-                "od-IN": "କିଛି ଛାଡି ଦେଇଛନ୍ତି କି? ଦୟାକରି ଆପଣ କିପରି ଅନୁଭବ କରୁଛନ୍ତି ଏବଂ ଆପଣଙ୍କର ସମସ୍ୟା ବିଷୟରେ ଅଧିକ ବିବରଣୀ ଦିଅନ୍ତୁ।",
-                "en-IN": "Did you miss something? Please give more details of what you are feeling and explain your problem.",
+                "hi-IN": f"आपने बताया कि आपको {sym_desc} की समस्या है। क्या इसके अलावा भी आपको कोई अन्य तकलीफ़, दर्द या परेशानी हो रही है? अगर हाँ, तो कृपया बताएं।",
+                "ta-IN": f"நீங்கள் {sym_desc} பற்றி குறிப்பிட்டீர்கள். இதைத் தவிர வேறு ஏதேனும் பிரச்சனைகள் அல்லது அசௌகரியங்களை எதிர்கொள்கிறீர்களா? ஆம் என்றால் கூறுங்கள்.",
+                "te-IN": f"మీరు {sym_desc} గురించి చెప్పారు. ఇవి కాకుండా మీకు మరేదైనా సమస్య లేదా నొప్పి ఉందా? ఉంటే దయచేసి చెప్పండి.",
+                "bn-IN": f"আপনি {sym_desc} এর কথা বললেন। এগুলি ছাড়া কি আপনার অন্য কোনো সমস্যা বা কষ্ট হচ্ছে? থাকলে দয়া করে বলুন।",
+                "ml-IN": f"നിങ്ങൾ {sym_desc} കുറിച്ച് പറഞ്ഞു. ഇതുകൂടാതെ മറ്റ് എന്തെങ്കിലും ബുദ്ധിമുട്ടുകൾ നേരിടുന്നുണ്ടോ? എങ്കിൽ പറയുക.",
+                "mr-IN": f"आपण {sym_desc} बद्दल सांगितले. याव्यतिरिक्त आपल्याला इतर काही त्रास किंवा समस्या होत आहे का? असल्यास सांगा.",
+                "gu-IN": f"તમે {sym_desc} વિશે જણાવ્યું. આ સિવાય તમને અન્ય કોઈ તકલીફ કે સમસ્યા થઈ રહી છે? જો હા, તો જણાવો.",
+                "kn-IN": f"ನೀವು {sym_desc} ಬಗ್ಗೆ ತಿಳಿಸಿದ್ದೀರಿ. ಇದಲ್ಲದೆ ನಿಮಗೆ ಬೇರೆ ಯಾವುದೇ ಸಮಸ್ಯೆ ಅಥವಾ ನೋವು ಇದೆಯೇ? ಇದ್ದರೆ ತಿಳಿಸಿ.",
+                "pa-IN": f"ਤੁਸੀਂ {sym_desc} ਬਾਰੇ ਦੱਸਿਆ। ਕੀ ਇਸ ਤੋਂ ਇਲਾਵਾ ਵੀ ਤੁਹਾਨੂੰ ਕੋਈ ਹੋਰ ਤਕਲੀਫ਼ ਹੈ? ਜੇਕਰ ਹਾਂ, ਤਾਂ ਦੱਸੋ।",
+                "od-IN": f"ଆପଣ କହିଲେ ଯେ ଆପଣଙ୍କର {sym_desc_od} ସମସ୍ୟା ଅଛି। ଏହା ବ୍ୟତୀତ ଆପଣଙ୍କୁ ଆଉ କୌଣସି ସମସ୍ୟା ବା କଷ୍ଟ ହେଉଛି କି? ଯଦି ହଁ, ଦୟାକରି କୁହନ୍ତୁ।",
+                "en-IN": f"You mentioned that you are having {sym_desc_en}. Besides these, are you facing any other problems, symptoms, or discomfort? If yes, please tell me.",
             }
         }
 
