@@ -37,8 +37,23 @@ from app.services.memory_store import session_memory
 from app.services.rag_triage_service import rag_triage
 from app.services.ocr_service import ocr_service
 from app.core.prompts import ANSWER_ADEQUACY_SYSTEM, build_answer_adequacy_prompt
+from app.urgency import urgency_detector
 
 router = APIRouter(prefix="/kiosk", tags=["Kiosk & AI Interrogation"])
+
+EMERGENCY_MESSAGES = {
+    "en-IN": "Immediate medical attention required! A critical urgency symptom has been detected. Please go immediately and meet the doctor at the emergency counter.",
+    "hi-IN": "तत्काल चिकित्सा सहायता आवश्यक है! एक गंभीर स्वास्थ्य लक्षण का पता चला है। कृपया तुरंत जाएं और डॉक्टर से मिलें।",
+    "or-IN": "ତୁରନ୍ତ ଡାକ୍ତରୀ ସହାୟତା ଆବଶ୍ୟକ! ଏକ ଗୁରୁତର ସ୍ୱାସ୍ଥ୍ୟ ସମସ୍ୟା ଚିହ୍ନଟ ହୋଇଛି। ଦୟାକରି ତୁରନ୍ତ ଯାଇ ଡାକ୍ତରଙ୍କୁ ଭେଟନ୍ତୁ।",
+    "ta-IN": "உடனடி மருத்துவ கவனிப்பு தேவை! கடுமையான உடல்நலக் குறைபாடு கண்டறியப்பட்டது. தயவுசெய்து உடனடியாக மருத்துவரை அணுகவும்.",
+    "te-IN": "తక్షణ వైద్య సహాయం అవసరం! తీవ్రమైన ఆరోగ్య సమస్య గుర్తించబడింది. దయచేసి వెంటనే వైద్యుడిని సంప్రదించండి.",
+    "bn-IN": "জরুরি চিকিৎসা সহায়তা প্রয়োজন! একটি গুরুতর স্বাস্থ্য লক্ষণ সনাক্ত করা হয়েছে। দয়া করে অবিলম্বে ডাক্তারের সাথে দেখা করুন।",
+    "ml-IN": "ഉടൻ വൈദ്യസഹായം ആവശ്യമാണ്! ഗുരുതരമായ ലക്ഷണങ്ങൾ കണ്ടെത്തി. ദയവായി ഉടൻ തന്നെ ഡോക്ടറെ കാണുക.",
+    "mr-IN": "तातडीने वैद्यकीय मदतीची गरज आहे! गंभीर लक्षणे आढळली आहेत. कृपया त्वरित डॉक्टरांना भेटा.",
+    "gu-IN": "તાત્કાલિક તબીબી સારવાર જરૂરી છે! ગંભીર લક્ષણો જણાયા છે. કૃપા કરીને તરત જ ડૉક્ટરને મળો.",
+    "kn-IN": "ತಕ್ಷಣ ವೈದ್ಯಕೀಯ ನೆರವು ಅಗತ್ಯವಿದೆ! ತೀವ್ರ ಆರೋಗ್ಯ ಲಕ್ಷಣ ಕಂಡುಬಂದಿದೆ. ದಯವಿಟ್ಟು ತಕ್ಷಣ ವೈದ್ಯರನ್ನು ಭೇಟಿ ಮಾಡಿ.",
+    "pa-IN": "ਤੁਰੰਤ ਡਾਕਟਰੀ ਸਹਾਇਤਾ ਦੀ ਲੋੜ ਹੈ! ਗੰਭੀਰ ਲੱਛਣ ਮਿਲੇ ਹਨ। ਕਿਰਪਾ ਕਰਕੇ ਤੁਰੰਤ ਡਾਕਟਰ ਨੂੰ ਮਿਲੋ।",
+}
 
 
 # ── Speech Synthesis Dispatcher (Local Kokoro vs Sarvam Cloud) ────────────────
@@ -131,6 +146,24 @@ def _get_localized_cam_guidance(lang_code: str) -> str:
     return CAM_GUIDANCE_TEXTS.get(lang_prefix, CAM_GUIDANCE_TEXTS["en"])
 
 
+def _patient_mentions_prescription_or_report(answer_clean: str, answer_en: str) -> bool:
+    """Detects if patient stated they have a medical report, prescription, lab test, or paper."""
+    clean = (answer_clean or "").strip().lower()
+    en = (answer_en or "").strip().lower()
+    combined = f"{clean} {en}"
+
+    report_keywords = [
+        "report", "prescription", "parcha", "parchi", "pacha", "petti",
+        "doctor slip", "medical note", "test report", "blood report", "lab report",
+        "xray", "x-ray", "scan report", "discharge summary", "discharge card",
+        "parcha hai", "report hai", "have report", "have some report",
+        "got a report", "brought a report", "show report", "show prescription",
+        "doctor paper", "medical paper", "slip hai",
+        "पर्चा", "रिपोर्ट", "कागज़", "ଡାକ୍ତର ପର୍ଚା", "ରିପୋର୍ଟ", "ପ୍ରେସକ୍ରିପସନ"
+    ]
+    return any(kw in combined for kw in report_keywords)
+
+
 def _get_phase(memory: dict) -> str:
     """
     Determines the current interrogation phase from session memory.
@@ -165,11 +198,12 @@ def _build_questions_status(questions: List[dict]) -> List[dict]:
 async def get_queued_patient_ids(device: EndpointDevice = Depends(get_current_device)):
     """
     Returns queued patients with full triage details for the kiosk display.
+    Emergency cases are prioritized at the top of the queue.
     """
     patients = await Patient.find(
         Patient.care_hub_id == device.care_hub_id,
-        In(Patient.status, ["queued_for_ai", "waiting", "registered"]),
-    ).sort("created_at").to_list()
+        In(Patient.status, ["queued_for_ai", "waiting", "registered", "emergency_queue"]),
+    ).sort([("priority", -1), ("created_at", 1)]).to_list()
 
     return [
         {
@@ -186,9 +220,50 @@ async def get_queued_patient_ids(device: EndpointDevice = Depends(get_current_de
             "chief_complaints": p.chief_complaints,
             "contact_number": p.contact_number,
             "created_at": p.created_at.isoformat(),
+            "priority": getattr(p, "priority", "normal"),
+            "urgency_level": getattr(p, "urgency_level", "green"),
+            "urgency_detected": getattr(p, "urgency_detected", False),
+            "urgency_details": getattr(p, "urgency_details", None),
         }
         for p in patients
     ]
+
+
+@router.get("/queues/grouped")
+async def get_kiosk_grouped_queues(device: EndpointDevice = Depends(get_current_device)):
+    """
+    Returns separate Emergency (Red) and Normal queues for facility kiosk devices.
+    """
+    patients = await Patient.find(
+        Patient.care_hub_id == device.care_hub_id,
+        In(Patient.status, ["queued_for_ai", "waiting", "registered", "emergency_queue", "pending_verification"]),
+    ).sort("-created_at").to_list()
+
+    def serialize_p(p):
+        return {
+            "patient_id": p.patient_id,
+            "full_name": p.full_name or f"Patient {p.patient_id}",
+            "age": p.age,
+            "gender": p.gender,
+            "blood_group": p.blood_group,
+            "chief_complaints": p.chief_complaints,
+            "priority": getattr(p, "priority", "normal"),
+            "urgency_level": getattr(p, "urgency_level", "green"),
+            "urgency_detected": getattr(p, "urgency_detected", False),
+            "urgency_details": getattr(p, "urgency_details", None),
+            "created_at": p.created_at.isoformat(),
+        }
+
+    emergency_list = [serialize_p(p) for p in patients if getattr(p, "priority", "normal") == "emergency" or getattr(p, "urgency_detected", False)]
+    normal_list = [serialize_p(p) for p in patients if serialize_p(p) not in emergency_list]
+
+    return {
+        "emergency_queue": emergency_list,
+        "normal_queue": normal_list,
+        "emergency_count": len(emergency_list),
+        "normal_count": len(normal_list),
+        "total_count": len(patients),
+    }
 
 
 @router.get("/patient/{patient_id}")
@@ -365,6 +440,116 @@ async def reply_audio(
     )
 
 
+# ── Emergency Interruption Handler ──────────────────────────────────────────
+
+async def _handle_emergency_interruption(
+    session_id: str,
+    patient_id: str,
+    answer_clean: str,
+    answer_en: str,
+    transcribed_text: Optional[str],
+    lang_code: str,
+    lang_name: str,
+    speaker: str,
+    engine_choice: str,
+    device: EndpointDevice,
+    urgency_res: Any,
+    memory: Dict[str, Any],
+    llm_verification: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Halts AI interrogation immediately upon detecting a red flag urgency signal.
+    Instructs the patient to proceed to the doctor immediately, synthesizes emergency audio,
+    and assigns the patient directly to the Emergency (Red) Queue.
+    """
+    first_signal = urgency_res.signals[0] if urgency_res.signals else None
+    signal_id = first_signal.signal_id if first_signal else "critical_urgency"
+
+    # Localized urgent instruction
+    emergency_msg = EMERGENCY_MESSAGES.get(lang_code)
+    if not emergency_msg:
+        base_en = EMERGENCY_MESSAGES["en-IN"]
+        try:
+            emergency_msg = await sarvam_ai.translate(base_en, source_lang="en-IN", target_lang=lang_code)
+        except Exception:
+            emergency_msg = base_en
+
+    # Synthesize urgent voice prompt
+    emergency_audio, engine_used = await synthesize_speech(
+        text=emergency_msg,
+        lang_code=lang_code,
+        speaker=speaker,
+        engine=engine_choice,
+    )
+
+    # Update patient in MongoDB -> Added to Red Emergency Queue
+    patient = await Patient.find_one(
+        Patient.patient_id == patient_id,
+        Patient.care_hub_id == device.care_hub_id,
+    )
+    if patient:
+        patient.status = "emergency_queue"
+        patient.priority = "emergency"
+        patient.urgency_level = "red"
+        patient.urgency_detected = True
+        patient.urgency_details = {
+            "signal_id": signal_id,
+            "matched_phrase": getattr(first_signal, "matched_phrase", None),
+            "similarity": getattr(first_signal, "similarity", None),
+            "layer": getattr(urgency_res, "layer", "unknown"),
+            "action": getattr(urgency_res, "action", "HIGH_PRIORITY_REVIEW"),
+            "llm_verification": llm_verification,
+            "detected_at": datetime.utcnow().isoformat(),
+        }
+        patient.chief_complaints = f"🚨 RED FLAG EMERGENCY: {signal_id.replace('_', ' ').title()} - Advised to see doctor immediately."
+        patient.ai_summary = {
+            "is_emergency": True,
+            "priority": "emergency",
+            "urgency_level": "red",
+            "urgency_signal": signal_id,
+            "concluding_message": emergency_msg,
+            "urgency_details": patient.urgency_details,
+            "chief_complaints": patient.chief_complaints,
+            "interrogation_completed_at": datetime.utcnow().isoformat(),
+            "device_id": device.device_id,
+            "language": lang_name,
+            "tts_engine_used": engine_used,
+            "total_questions_asked": len([q for q in memory.get("questions", []) if q.get("flag") == "asked"]),
+            "interruption_reason": "urgent_signal_detected",
+        }
+        await patient.save()
+
+    # Update session memory
+    memory["status"] = "emergency_completed"
+    memory["phase"] = "complete"
+    memory["is_emergency"] = True
+    memory["urgency_detected"] = True
+    memory["urgency_details"] = patient.urgency_details if patient else {}
+    await session_memory.save_session(session_id, memory)
+
+    return {
+        "session_id": session_id,
+        "patient_id": patient_id,
+        "is_complete": True,
+        "is_emergency": True,
+        "urgency_detected": True,
+        "queue_type": "emergency",
+        "urgency_level": "red",
+        "urgency_signals": [s.model_dump() if hasattr(s, "model_dump") else s for s in urgency_res.signals],
+        "urgency_layer": getattr(urgency_res, "layer", "unknown"),
+        "phase": "complete",
+        "concluding_message": emergency_msg,
+        "concluding_message_en": EMERGENCY_MESSAGES["en-IN"],
+        "tts_engine": engine_used,
+        "audio_base64": emergency_audio,
+        "patient_answer_recorded": answer_clean,
+        "patient_answer_en": answer_en,
+        "transcribed_text": transcribed_text,
+        "next_stage": "emergency_queue",
+        "questions_status": _build_questions_status(memory.get("questions", [])),
+    }
+
+
 # ── Core reply processor ────────────────────────────────────────────────────
 
 async def _process_reply(
@@ -396,13 +581,104 @@ async def _process_reply(
     else:
         answer_en = answer_clean
 
+    # ── IMMEDIATE TWO-LAYER URGENCY SIGNAL DETECTION ────────────────────────
+    # Run the two-layer local detector on both patient's original response and translated English.
+    # If a high-priority urgency signal is detected:
+    # -> HALT interrogation immediately!
+    # -> DO NOT ask any further questions.
+    # -> Instruct patient: "Please go immediately and meet the doctor."
+    # -> Route patient to Emergency (Red) Queue.
+    urgency_res = urgency_detector.detect_urgency(
+        answer_clean, patient_id=patient_id, session_id=session_id
+    )
+    if not urgency_res.urgency_signal_detected and answer_en != answer_clean:
+        urgency_res_en = urgency_detector.detect_urgency(
+            answer_en, patient_id=patient_id, session_id=session_id
+        )
+        if urgency_res_en.urgency_signal_detected:
+            urgency_res = urgency_res_en
+
+    if urgency_res.urgency_signal_detected:
+        # LLM Clinical Validation Check:
+        # Differentiates true acute emergencies (e.g. "severe crushing chest pain")
+        # from mild, chronic, or benign symptoms (e.g. "mild heart pain", "slight chest pain for weeks")
+        first_sig = urgency_res.signals[0] if urgency_res.signals else None
+        concept_id = first_sig.signal_id if first_sig else "critical_urgency"
+        matched_phrase = getattr(first_sig, "matched_phrase", None)
+
+        llm_verif = await sarvam_ai.verify_urgency_signal(
+            patient_text=answer_clean,
+            patient_text_en=answer_en,
+            detected_concept=concept_id,
+            matched_phrase=matched_phrase,
+        )
+
+        if llm_verif.get("is_true_emergency", True) and llm_verif.get("should_halt_interview", True):
+            # TRUE EMERGENCY VERIFIED -> Halt immediately & route to Red Queue
+            return await _handle_emergency_interruption(
+                session_id=session_id,
+                patient_id=patient_id,
+                answer_clean=answer_clean,
+                answer_en=answer_en,
+                transcribed_text=transcribed_text,
+                lang_code=lang_code,
+                lang_name=lang_name,
+                speaker=speaker,
+                engine_choice=engine_choice,
+                device=device,
+                urgency_res=urgency_res,
+                memory=memory,
+                llm_verification=llm_verif,
+            )
+        else:
+            # NON-EMERGENCY / MILD SYMPTOM -> MOVE FORWARD!
+            # The patient stated mild or non-acute symptoms ("mild heart pain").
+            # Do NOT halt interrogation! Proceed to collect further clinical details.
+            memory.setdefault("clinical_notes", []).append(
+                f"Urgency trigger '{concept_id}' monitored: Patient reported '{answer_en}' (LLM classified: {llm_verif.get('reason')})."
+            )
+
     # 2. Find the currently pending (asked, unanswered) question
     pending_q = next(
         (q for q in questions if q["flag"] == "asked" and q.get("patient_answer") is None),
         None
     )
 
-    # 2a. LLM Answer Adequacy Validation ─────────────────────────────────────
+    # 2a. Proactive Check: If patient mentions having a medical report or prescription to show
+    # (e.g. "I have some report", "mere paas parchi hai", "I brought doctor note", etc.)
+    # Immediately open camera for OCR without blocking on further text questions!
+    if current_phase in ("phase_1", "phase_2", "phase_3", "phase_prescription_prompt") and _patient_mentions_prescription_or_report(answer_clean, answer_en):
+        memory["phase"] = "phase_prescription_camera"
+        if pending_q:
+            pending_q["patient_answer"] = answer_clean
+            pending_q["patient_answer_en"] = answer_en
+
+        cam_guidance = _get_localized_cam_guidance(lang_code)
+        cam_guidance_en = "Please hold your prescription or report steady in front of the camera to take a photo, or upload an image."
+
+        cam_audio, engine_used = await synthesize_speech(
+            text=cam_guidance, lang_code=lang_code, speaker=speaker, engine=engine_choice
+        )
+        await session_memory.save_session(session_id, memory)
+
+        return {
+            "session_id": session_id,
+            "patient_id": patient_id,
+            "is_complete": False,
+            "phase": "phase_prescription_camera",
+            "open_camera": True,
+            "patient_answer_recorded": answer_clean,
+            "patient_answer_en": answer_en,
+            "transcribed_text": transcribed_text,
+            "current_question": cam_guidance,
+            "current_question_en": cam_guidance_en,
+            "question_intent": "Camera prescription capture",
+            "tts_engine": engine_used,
+            "audio_base64": cam_audio,
+            "questions_status": _build_questions_status(questions),
+        }
+
+    # 2b. LLM Answer Adequacy Validation ─────────────────────────────────────
     #   For phases 2 & 3 (where questions have specific clinical intents), check
     #   whether the patient actually answered or is requesting a repeat / saying
     #   they could not hear.  Phase 1 open narrative questions are always lenient.
@@ -738,17 +1014,21 @@ async def _classify_prescription_inquiry_intent(answer_en: str, answer_clean: st
     en_lower = (answer_en or "").strip().lower()
     combined = f"{en_lower} {clean_lower}"
 
+    # 0. Immediate positive check for report or prescription mention
+    if _patient_mentions_prescription_or_report(answer_clean, answer_en):
+        return "yes"
+
     # 1. Quick check for repeat request
     repeat_words = ["repeat", "again", "say again", "ask again", "hear", "pardon", "sorry", "kya bola", "sunai", "phir se", "samajh nahi"]
     if any(rw in combined for rw in repeat_words):
         return "repeat"
 
-    # 2. Strong negative indicators
+    # 2. Strong negative indicators (with word-boundary matching)
     negative_patterns = [
         "no", "not", "nahi", "nahin", "don't", "none", "nhi", "kuch nahi",
         "kichhi nahi", "nothing", "skip", "ନାହିଁ", "ନା", "नहीं", "कोई पर्चा नहीं",
-        "இல்லை", "illai", "లేదు", "ledu", "না", "নেই", "na",
-        "ഇല്ല", "illa", "नाही", "nahi", "નથી", "nathi", "ಇಲ್ಲ", "illa", "ਨਹੀਂ", "nahin"
+        "இல்லை", "illai", "లేదు", "ledu", "না", "নেই",
+        "ഇല്ല", "illa", "नाही", "નથી", "nathi", "ಇಲ್ಲ", "ਨਹੀਂ"
     ]
     # 3. Strong positive indicators
     positive_patterns = [
@@ -758,11 +1038,12 @@ async def _classify_prescription_inquiry_intent(answer_en: str, answer_clean: st
         "ஆம்", "உள்ளது", "aam", "ullathu", "అవును", "ఉంది", "avunu", "undi",
         "হ্যাঁ", "আছে", "hyan", "achhe", "അതെ", "ഉണ്ട്", "athe", "undu",
         "होय", "आहे", "hoy", "aahe", "હા", "છે", "haa", "chhe",
-        "ಹೌದು", "ಇದೆ", "haudu", "ide", "ਹਾਂ", "ਹੈ", "haan", "hai"
+        "ಹೌದು", "ಇದೆ", "haudu", "ide", "ਹਾਂ", "ਹੈ"
     ]
 
-    has_neg = any(nw in combined for nw in negative_patterns)
-    has_pos = any(pw in combined for pw in positive_patterns)
+    tokens = set(re.findall(r'\b\w+\b', combined.lower()))
+    has_neg = any(nw.lower() in tokens or nw.lower() in combined for nw in negative_patterns)
+    has_pos = any(pw.lower() in tokens or pw.lower() in combined for pw in positive_patterns)
 
     if has_pos and not has_neg:
         return "yes"
@@ -969,6 +1250,9 @@ async def _finalize_session_summary(
     )
     if patient:
         patient.status = "pending_verification"
+        patient.priority = getattr(patient, "priority", "normal") or "normal"
+        patient.urgency_level = getattr(patient, "urgency_level", "green") or "green"
+        patient.urgency_detected = getattr(patient, "urgency_detected", False)
         patient.chief_complaints = ai_summary.get("chief_complaints", "Completed via AI kiosk")
 
         structured_ai_summary = {
@@ -999,6 +1283,10 @@ async def _finalize_session_summary(
         "session_id": session_id,
         "patient_id": patient_id,
         "is_complete": True,
+        "is_emergency": False,
+        "urgency_detected": False,
+        "queue_type": "normal",
+        "urgency_level": "green",
         "phase": "complete",
         "patient_answer_recorded": answer_clean,
         "patient_answer_en": answer_en,
@@ -1127,8 +1415,165 @@ async def upload_prescription_photo(
     memory["prescription_result"] = result
     memory["has_prescription"] = True
 
-    # Complete the interrogation session and return final clinical summary
-    return await _finalize_session_summary(
+    # Check if there are still interview questions pending to be asked
+    questions = memory.get("questions", [])
+    current_phase = memory.get("phase", "phase_1")
+
+    has_unasked_in_phase = any(
+        q.get("flag") == "not_asked" and q.get("phase") in ("phase_1", "phase_2", "phase_3")
+        for q in questions
+    )
+    phase1_needs_q2 = (
+        current_phase == "phase_1" and
+        any(q.get("id") == 1 and q.get("patient_answer_en") for q in questions) and
+        not any(q.get("phase") == "phase_1" and q.get("id") == 2 for q in questions)
+    )
+
+    # If patient uploaded prescription during symptom inquiry (phase 1, 2, or 3)
+    if has_unasked_in_phase or phase1_needs_q2 or current_phase in ("phase_1", "phase_2", "phase_3"):
+        if "hi" in lang_code:
+            ack_prefix = "आपका पर्चा रिकॉर्ड कर लिया गया है। चलिए आपकी जांच जारी रखते हैं। "
+        elif "od" in lang_code:
+            ack_prefix = "ଆପଣଙ୍କ ରିପୋର୍ଟ ରେକର୍ଡ ହୋଇଛି। ଆସନ୍ତୁ ପରବର୍ତ୍ତୀ ପ୍ରଶ୍ନକୁ ଯିବା। "
+        else:
+            ack_prefix = "Your medical report has been attached. Let us continue with your consultation. "
+
+        if current_phase == "phase_1":
+            q1_answered = any(q["id"] == 1 and q.get("patient_answer_en") for q in questions)
+            q2_obj = next((q for q in questions if q.get("phase") == "phase_1" and q["id"] == 2), None)
+            if q1_answered and q2_obj is None:
+                q2_data = await sarvam_ai.generate_primary_question(2, lang_name.lower())
+                q2_entry = {
+                    "id": 2,
+                    "phase": "phase_1",
+                    "flag": "asked",
+                    "clinical_intent": "Ensure full symptom disclosure",
+                    "question_text_en": q2_data["question_text_en"],
+                    "question_text": q2_data["question_text"],
+                    "patient_answer": None,
+                    "patient_answer_en": None,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+                questions.append(q2_entry)
+                next_q_text = ack_prefix + q2_data["question_text"]
+                q_audio, engine_used = await synthesize_speech(
+                    text=next_q_text, lang_code=lang_code, speaker=speaker, engine=engine_choice
+                )
+                await session_memory.save_session(session_id, memory)
+                return {
+                    "session_id": session_id,
+                    "patient_id": patient_id,
+                    "is_complete": False,
+                    "success": True,
+                    "open_camera": False,
+                    "phase": "phase_1",
+                    "current_question": next_q_text,
+                    "current_question_en": q2_data["question_text_en"],
+                    "question_intent": "Ensure full symptom disclosure",
+                    "audio_base64": q_audio,
+                    "tts_engine": engine_used,
+                    "prescription_data": result,
+                    "questions_status": _build_questions_status(questions),
+                }
+            elif q2_obj and q2_obj.get("patient_answer_en"):
+                phase1_answers_en = [q.get("patient_answer_en", "") for q in questions if q.get("phase") == "phase_1" and q.get("patient_answer_en")]
+                symptoms_summary = await rag_triage.extract_symptom_summary(phase1_answers_en)
+                memory["symptoms_summary"] = symptoms_summary
+                candidates = await rag_triage.retrieve_candidate_diseases(symptoms_summary, top_k=5)
+                memory["rag_candidates"] = candidates
+                rag_questions = await rag_triage.generate_rag_followup_questions(
+                    symptoms_summary=symptoms_summary,
+                    candidate_diseases=candidates,
+                    already_asked_intents=["Open symptom disclosure", "Ensure full symptom disclosure"],
+                    lang_name=lang_name,
+                    lang_code=lang_code,
+                )
+                q_id = len(questions) + 1
+                for idx, rq in enumerate(rag_questions):
+                    questions.append({
+                        "id": q_id + idx,
+                        "phase": "phase_2",
+                        "flag": "not_asked",
+                        "clinical_intent": rq.get("clinical_intent", "RAG differential follow-up"),
+                        "target_differential": rq.get("target_differential", ""),
+                        "question_text_en": rq["question_text_en"],
+                        "question_text": rq.get("question_text", rq["question_text_en"]),
+                        "patient_answer": None,
+                        "patient_answer_en": None,
+                        "timestamp": None,
+                    })
+                memory["phase"] = "phase_2"
+                resp = await _ask_next_in_phase(
+                    memory, questions, session_id, patient_id, "phase_2",
+                    lang_code, speaker, engine_choice,
+                    "Medical report uploaded", "Medical report uploaded", None
+                )
+                resp["success"] = True
+                resp["open_camera"] = False
+                resp["prescription_data"] = result
+                return resp
+
+        elif current_phase == "phase_2":
+            remaining = [q for q in questions if q.get("phase") == "phase_2" and q["flag"] == "not_asked"]
+            if remaining:
+                resp = await _ask_next_in_phase(
+                    memory, questions, session_id, patient_id, "phase_2",
+                    lang_code, speaker, engine_choice,
+                    "Medical report uploaded", "Medical report uploaded", None
+                )
+                resp["success"] = True
+                resp["open_camera"] = False
+                resp["prescription_data"] = result
+                return resp
+            else:
+                candidates = memory.get("rag_candidates", [])
+                symptoms_summary = memory.get("symptoms_summary", "")
+                detail_questions = await rag_triage.generate_detail_questions(
+                    symptoms_summary=symptoms_summary,
+                    candidate_diseases=candidates,
+                    lang_name=lang_name,
+                    lang_code=lang_code,
+                )
+                q_id = len(questions) + 1
+                for idx, dq in enumerate(detail_questions):
+                    questions.append({
+                        "id": q_id + idx,
+                        "phase": "phase_3",
+                        "flag": "not_asked",
+                        "clinical_intent": dq.get("clinical_intent", "Clinical detail"),
+                        "detail_type": dq.get("detail_type", ""),
+                        "question_text_en": dq["question_text_en"],
+                        "question_text": dq.get("question_text", dq["question_text_en"]),
+                        "patient_answer": None,
+                        "patient_answer_en": None,
+                        "timestamp": None,
+                    })
+                memory["phase"] = "phase_3"
+                resp = await _ask_next_in_phase(
+                    memory, questions, session_id, patient_id, "phase_3",
+                    lang_code, speaker, engine_choice,
+                    "Medical report uploaded", "Medical report uploaded", None
+                )
+                resp["success"] = True
+                resp["open_camera"] = False
+                resp["prescription_data"] = result
+                return resp
+
+        elif current_phase == "phase_3":
+            remaining = [q for q in questions if q.get("phase") == "phase_3" and q["flag"] == "not_asked"]
+            if remaining:
+                resp = await _ask_next_in_phase(
+                    memory, questions, session_id, patient_id, "phase_3",
+                    lang_code, speaker, engine_choice,
+                    "Medical report uploaded", "Medical report uploaded", None
+                )
+                resp["success"] = True
+                resp["open_camera"] = False
+                resp["prescription_data"] = result
+                return resp
+
+    # If all questioning is complete: finalize summary and proceed to 10s health worker vitals input
+    summary_resp = await _finalize_session_summary(
         session_id=session_id,
         patient_id=patient_id,
         memory=memory,
@@ -1142,6 +1587,10 @@ async def upload_prescription_photo(
         engine_choice=engine_choice,
         prescription_data=result,
     )
+    summary_resp["success"] = True
+    summary_resp["open_camera"] = False
+    summary_resp["prescription_data"] = result
+    return summary_resp
 
 
 @router.post("/session/skip-prescription")
@@ -1160,7 +1609,7 @@ async def skip_prescription(
     speaker = memory.get("speaker", "priya")
     engine_choice = memory.get("tts_engine", "local")
 
-    return await _finalize_session_summary(
+    summary_resp = await _finalize_session_summary(
         session_id=session_id,
         patient_id=patient_id,
         memory=memory,
@@ -1173,6 +1622,8 @@ async def skip_prescription(
         speaker=speaker,
         engine_choice=engine_choice,
     )
+    summary_resp["success"] = True
+    return summary_resp
 
 
 @router.get("/session/{session_id}/memory")

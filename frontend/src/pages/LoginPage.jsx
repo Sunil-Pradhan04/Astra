@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link, Navigate } from 'react-router-dom'
 import AdminLoginPage from './admin/AdminLoginPage'
 import { healthWorkerLogin } from '../api/workerApi'
 import { deviceLogin } from '../api/deviceApi'
+import { doctorLogin } from '../api/doctorApi'
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
 const IconBack = () => (
@@ -333,6 +334,24 @@ export default function LoginPage() {
         navigate('/device/terminal')
       } catch (err) {
         setError(err.response?.data?.detail || 'Invalid Device ID or password')
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
+
+    if (role === 'doctor') {
+      setLoading(true)
+      try {
+        const res = await doctorLogin({
+          doctor_id: formData.doctorId?.trim().toUpperCase(),
+          password: formData.password,
+        })
+        localStorage.setItem('doctor_token', res.data.access_token)
+        localStorage.setItem('doctor_info', JSON.stringify(res.data.doctor || res.data))
+        navigate('/doctor/desk')
+      } catch (err) {
+        setError(err.response?.data?.detail || 'Invalid Doctor ID or password')
       } finally {
         setLoading(false)
       }

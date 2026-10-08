@@ -13,7 +13,7 @@ import { getDoctors, createDoctor, deleteDoctor } from '../../../api/adminApi'
 
 export default function AddDoctorsTab() {
   const [doctors, setDoctors] = useState([])
-  const [form, setForm]       = useState({ full_name: '', email: '', specialization: '' })
+  const [form, setForm]       = useState({ full_name: '', email: '', role: 'medicine_specialist', specialization: '' })
   const [loading, setLoading] = useState(false)
   const [fetching, setFetching] = useState(true)
   const [error, setError]     = useState('')
@@ -39,7 +39,7 @@ export default function AddDoctorsTab() {
     try {
       const res = await createDoctor(form)
       setCreated(res.data)
-      setForm({ full_name: '', email: '', specialization: '' })
+      setForm({ full_name: '', email: '', role: 'medicine_specialist', specialization: '' })
       load()
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to create doctor account')
@@ -86,6 +86,12 @@ export default function AddDoctorsTab() {
             <div className="credentials-box__row">
               <span>Full Name</span>
               <strong>{created.doctor.full_name}</strong>
+            </div>
+            <div className="credentials-box__row">
+              <span>Doctor Role</span>
+              <strong style={{ color: '#0284c7' }}>
+                {created.doctor.role === 'intern_doctor' ? 'Intern Doctor' : created.doctor.role === 'specialist' ? 'Specialist' : 'Medicine Specialist'}
+              </strong>
             </div>
             <div className="credentials-box__row">
               <span>Doctor ID</span>
@@ -140,20 +146,44 @@ export default function AddDoctorsTab() {
                 />
               </div>
             </div>
+          </div>
+
+          <div className="staff-form__row" style={{ marginTop: 12 }}>
             <div className="form-group">
-              <label className="form-label">Specialization</label>
+              <label className="form-label">Doctor Role / Clinical Tier *</label>
+              <div className="form-input-wrap">
+                <select
+                  name="role"
+                  className="form-input form-input--no-icon"
+                  value={form.role}
+                  onChange={handle}
+                  required
+                  style={{ background: '#f8fafc', fontWeight: 600 }}
+                >
+                  <option value="intern_doctor">Intern Doctor (General Clinical Queue)</option>
+                  <option value="medicine_specialist">Medicine Specialist (Core Medical Queue)</option>
+                  <option value="specialist">Specialist (Super-Speciality Consultations)</option>
+                </select>
+              </div>
+            </div>
+            <div className="form-group">
+              <label className="form-label">
+                Specialization / Department {form.role === 'specialist' ? '*' : '(Optional)'}
+              </label>
               <div className="form-input-wrap">
                 <input
                   name="specialization"
                   className="form-input form-input--no-icon"
-                  placeholder="e.g. Cardiology, General Medicine"
+                  placeholder={form.role === 'specialist' ? "e.g. Cardiology, Pediatrics, Neurology" : "e.g. Internal Medicine, General Physician"}
                   value={form.specialization}
                   onChange={handle}
+                  required={form.role === 'specialist'}
                 />
               </div>
             </div>
           </div>
-          <button type="submit" className="btn-submit" style={{ maxWidth: 200 }} disabled={loading}>
+
+          <button type="submit" className="btn-submit" style={{ maxWidth: 220, marginTop: 14 }} disabled={loading}>
             {loading ? 'Registering…' : 'Create Doctor Account'}
           </button>
         </form>
@@ -180,35 +210,56 @@ export default function AddDoctorsTab() {
         )}
 
         <div className="staff-list__items">
-          {doctors.map(d => (
-            <div key={d.doctor_id} className="staff-row">
-              <div className="staff-row__avatar">
-                <Stethoscope size={16} />
-              </div>
-              <div className="staff-row__info">
-                <div className="staff-row__name">{d.full_name}</div>
-                <div className="staff-row__meta">
-                  <span className="staff-row__id-pill">{d.doctor_id}</span>
-                  <span>{d.email}</span>
+          {doctors.map(d => {
+            const roleBadge = {
+              intern_doctor: { label: 'Intern Doctor', bg: '#f0fdf4', color: '#16a34a', border: '#bbf7d0' },
+              medicine_specialist: { label: 'Medicine Specialist', bg: '#eff6ff', color: '#2563eb', border: '#bfdbfe' },
+              specialist: { label: 'Specialist', bg: '#faf5ff', color: '#9333ea', border: '#e9d5ff' },
+            }[d.role] || { label: 'Doctor', bg: '#f1f5f9', color: '#475569', border: '#e2e8f0' };
+
+            return (
+              <div key={d.doctor_id} className="staff-row">
+                <div className="staff-row__avatar">
+                  <Stethoscope size={16} />
                 </div>
-                {d.specialization && (
-                  <div className="staff-row__tag">{d.specialization}</div>
-                )}
+                <div className="staff-row__info">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span className="staff-row__name">{d.full_name}</span>
+                    <span style={{
+                      fontSize: 11,
+                      fontWeight: 700,
+                      padding: '2px 8px',
+                      borderRadius: 12,
+                      background: roleBadge.bg,
+                      color: roleBadge.color,
+                      border: `1px solid ${roleBadge.border}`,
+                    }}>
+                      {roleBadge.label}
+                    </span>
+                  </div>
+                  <div className="staff-row__meta">
+                    <span className="staff-row__id-pill">{d.doctor_id}</span>
+                    <span>{d.email}</span>
+                  </div>
+                  {d.specialization && (
+                    <div className="staff-row__tag">{d.specialization}</div>
+                  )}
+                </div>
+                <div className={`staff-row__status ${d.is_online ? 'online' : ''}`}>
+                  <span className="staff-row__status-dot" />
+                  {d.is_online ? 'Online' : 'Offline'}
+                </div>
+                <button
+                  className="staff-row__del"
+                  onClick={() => remove(d.doctor_id)}
+                  aria-label={`Remove doctor ${d.full_name}`}
+                  title="Remove doctor"
+                >
+                  <Trash2 size={15} />
+                </button>
               </div>
-              <div className={`staff-row__status ${d.is_online ? 'online' : ''}`}>
-                <span className="staff-row__status-dot" />
-                {d.is_online ? 'Online' : 'Offline'}
-              </div>
-              <button
-                className="staff-row__del"
-                onClick={() => remove(d.doctor_id)}
-                aria-label={`Remove doctor ${d.full_name}`}
-                title="Remove doctor"
-              >
-                <Trash2 size={15} />
-              </button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>

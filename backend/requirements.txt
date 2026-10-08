@@ -14,3 +14,6 @@ httpx
 redis
 openai>=1.0.0
 pinecone>=6.0.0
+sentence-transformers>=2.2.0
+torch>=2.0.0
+numpy>=1.22.0

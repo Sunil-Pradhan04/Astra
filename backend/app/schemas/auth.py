@@ -49,3 +49,19 @@ class DeviceTokenResponse(BaseModel):
     device_name: str
     care_hub_id: str
     location: Optional[str] = None
+
+
+class DoctorLogin(BaseModel):
+    doctor_id: str
+    password: str
+
+
+class DoctorTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    doctor_id: str
+    full_name: str
+    email: str
+    role: str
+    specialization: Optional[str] = None
+    care_hub_id: str

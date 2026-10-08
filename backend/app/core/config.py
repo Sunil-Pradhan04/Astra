@@ -24,10 +24,10 @@ class Settings(BaseSettings):
     PINECONE_INDEX: str = "astra-diseases"
 
     # Cloudinary Image Storage
-    CLOUDINARY_API_KEY_NAME: str = "Astra"
+    CLOUDINARY_CLOUD_NAME: str = ""
     CLOUDINARY_API_KEY: str = ""
     CLOUDINARY_API_SECRET: str = ""
-    CLOUDINARY_CLOUD_NAME: str = ""
+    CLOUDINARY_API_KEY_NAME: str = ""
 
     class Config:
         env_file = ".env"

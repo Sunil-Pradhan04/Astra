@@ -14,6 +14,8 @@ from app.schemas.auth import (
     HealthWorkerTokenResponse,
     DeviceLogin,
     DeviceTokenResponse,
+    DoctorLogin,
+    DoctorTokenResponse,
 )
 from app.core.security import hash_password, verify_password, create_access_token, decode_token
 from app.dependencies.auth import get_current_worker, get_current_doctor, get_current_device
@@ -125,6 +127,56 @@ async def health_worker_heartbeat(worker: HealthWorker = Depends(get_current_wor
 # ──────────────────────────────────────────────
 #  Doctor
 # ──────────────────────────────────────────────
+
+@router.post("/doctor/login", response_model=DoctorTokenResponse)
+async def doctor_login(data: DoctorLogin):
+    did = data.doctor_id.strip().upper()
+    doctor = await Doctor.find_one(Doctor.doctor_id == did)
+    if not doctor or not verify_password(data.password, doctor.password_hash):
+        raise HTTPException(401, "Invalid Doctor ID or password")
+
+    doctor.is_online = True
+    doctor.last_seen_at = datetime.utcnow()
+    await doctor.save()
+
+    token = create_access_token({
+        "sub": str(doctor.id),
+        "doctor_id": doctor.doctor_id,
+        "role": "doctor",
+        "doctor_role": getattr(doctor, "role", "medicine_specialist"),
+        "care_hub_id": doctor.care_hub_id,
+    })
+
+    return DoctorTokenResponse(
+        access_token=token,
+        doctor_id=doctor.doctor_id,
+        full_name=doctor.full_name,
+        email=doctor.email,
+        role=getattr(doctor, "role", "medicine_specialist"),
+        specialization=doctor.specialization,
+        care_hub_id=doctor.care_hub_id,
+    )
+
+
+@router.get("/doctor/me", response_model=DoctorTokenResponse)
+async def doctor_me(doctor: Doctor = Depends(get_current_doctor)):
+    token = create_access_token({
+        "sub": str(doctor.id),
+        "doctor_id": doctor.doctor_id,
+        "role": "doctor",
+        "doctor_role": getattr(doctor, "role", "medicine_specialist"),
+        "care_hub_id": doctor.care_hub_id,
+    })
+    return DoctorTokenResponse(
+        access_token=token,
+        doctor_id=doctor.doctor_id,
+        full_name=doctor.full_name,
+        email=doctor.email,
+        role=getattr(doctor, "role", "medicine_specialist"),
+        specialization=doctor.specialization,
+        care_hub_id=doctor.care_hub_id,
+    )
+
 
 @router.post("/doctor/logout", status_code=200)
 async def doctor_logout(doctor: Doctor = Depends(get_current_doctor)):

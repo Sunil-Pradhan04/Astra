@@ -43,3 +43,7 @@ export const skipPrescription = (formData) =>
   axios.post('/kiosk/session/skip-prescription', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
+
+export const updatePatientVitals = (patientId, data) =>
+  axios.patch(`/patients/${patientId}/manual-update`, data)
+

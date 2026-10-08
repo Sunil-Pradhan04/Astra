@@ -131,8 +131,8 @@ export default function WorkerLayout({ children, activeStation, title, subtitle,
           </div>
         </div>
 
-        {/* Station Navigation Strip — completely hidden for receptionists */}
-        {worker.sub_role !== 'Reception' && !hideNav && (
+        {/* Station Navigation Strip — completely hidden for Verification Desk and non-reception roles */}
+        {!hideNav && !location.pathname.includes('verification') && worker.sub_role === 'Reception' && (
           <div className="worker-nav-strip">
             <div className="worker-nav-strip__inner">
               <div className="worker-nav-links">
@@ -143,25 +143,6 @@ export default function WorkerLayout({ children, activeStation, title, subtitle,
                   <ClipboardList size={14} />
                   <span>Reception &amp; Patient Intake</span>
                 </Link>
-                <Link
-                  to="/health-worker/verification"
-                  className={`worker-nav-link ${location.pathname.includes('verification') ? 'active' : ''}`}
-                >
-                  <CheckCircle2 size={14} />
-                  <span>AI Summary Verification</span>
-                </Link>
-                <Link
-                  to="/health-worker/dispensing"
-                  className={`worker-nav-link ${location.pathname.includes('dispensing') ? 'active' : ''}`}
-                >
-                  <Pill size={14} />
-                  <span>Prescription Dispensing</span>
-                </Link>
-              </div>
-
-              <div className="worker-live-status">
-                <Radio size={12} className="live-pulse-icon" />
-                <span>Sync Mode: Real-time</span>
               </div>
             </div>
           </div>

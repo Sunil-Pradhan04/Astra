@@ -11,6 +11,7 @@ import {
   AlertCircle,
   Phone,
   MapPin,
+  Mail,
   Bot,
   X,
 } from 'lucide-react'
@@ -22,6 +23,7 @@ export default function ReceptionPage() {
     age: '',
     gender: 'Male',
     contact_number: '',
+    email: '',
     address: '',
   }
 
@@ -33,6 +35,7 @@ export default function ReceptionPage() {
   // Queue State
   const [queue, setQueue] = useState([])
   const [loadingQueue, setLoadingQueue] = useState(true)
+  const [activeQueueTab, setActiveQueueTab] = useState('all') // 'all' | 'emergency' | 'normal'
 
   // Hover Popover State (Fixed Viewport Floating Card for Absolute Top Privilege)
   const [hoveredPatient, setHoveredPatient] = useState(null)
@@ -102,6 +105,7 @@ export default function ReceptionPage() {
         age: parseInt(form.age, 10),
         gender: form.gender,
         contact_number: form.contact_number.trim() || null,
+        email: form.email.trim() || null,
         address: form.address.trim() || null,
       }
 
@@ -268,19 +272,34 @@ export default function ReceptionPage() {
                 </div>
 
                 <div className="form-group">
-                  <label className="form-label" htmlFor="address">
-                    Residential Address / Village / District
+                  <label className="form-label" htmlFor="email">
+                    Email Address <span style={{ color: '#059669', fontSize: 11, fontWeight: 500 }}>(Optional - for digital prescription)</span>
                   </label>
                   <input
-                    id="address"
-                    name="address"
-                    type="text"
+                    id="email"
+                    name="email"
+                    type="email"
                     className="form-input"
-                    placeholder="e.g. Ward 4, Balasore"
-                    value={form.address}
+                    placeholder="e.g. patient@example.com"
+                    value={form.email}
                     onChange={handleChange}
                   />
                 </div>
+              </div>
+
+              <div className="form-group" style={{ marginTop: 12 }}>
+                <label className="form-label" htmlFor="address">
+                  Residential Address / Village / District
+                </label>
+                <input
+                  id="address"
+                  name="address"
+                  type="text"
+                  className="form-input"
+                  placeholder="e.g. Ward 4, Balasore"
+                  value={form.address}
+                  onChange={handleChange}
+                />
               </div>
 
               {/* Submit Button */}
@@ -310,14 +329,27 @@ export default function ReceptionPage() {
               <div>
                 <h3 className="reception-card__title">Patients in Queue</h3>
                 <p className="reception-card__sub">
-                  Hover over any patient bot to view full details
+                  Hover over any patient bot to view triage urgency and details
                 </p>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <div className="queue-counter-badge">
-                  <span className="queue-counter-badge__dot" />
-                  <span>{queue.length} in Queue</span>
-                </div>
+                {(() => {
+                  const emergencyCount = queue.filter(p => p.priority === 'emergency' || p.urgency_detected).length;
+                  return (
+                    <>
+                      {emergencyCount > 0 && (
+                        <div className="queue-counter-badge" style={{ background: '#fef2f2', border: '1px solid #f87171', color: '#dc2626' }}>
+                          <span className="queue-counter-badge__dot" style={{ background: '#ef4444' }} />
+                          <span style={{ fontWeight: 800 }}>🔴 {emergencyCount} Emergency</span>
+                        </div>
+                      )}
+                      <div className="queue-counter-badge">
+                        <span className="queue-counter-badge__dot" />
+                        <span>{queue.length} in Queue</span>
+                      </div>
+                    </>
+                  );
+                })()}
                 <button
                   onClick={fetchQueue}
                   className="btn-refresh-queue"
@@ -330,88 +362,154 @@ export default function ReceptionPage() {
               </div>
             </div>
 
-            {/* Queue Bots Grid */}
-            <div className="queue-bots-container" style={{ overflow: 'visible' }}>
-              {loadingQueue && queue.length === 0 ? (
-                <div className="queue-empty-square-state">
-                  <RefreshCw size={24} className="spin text-slate-400" style={{ marginBottom: 12 }} />
-                  <p>Loading queue...</p>
-                </div>
-              ) : queue.length === 0 ? (
-                <div className="queue-empty-square-state">
-                  <Bot size={40} className="empty-bot-icon" />
-                  <h4>No Patients in Queue</h4>
-                  <p>Register a patient on the left to add them to the queue.</p>
-                </div>
-              ) : (
-                <div className="queue-bots-grid">
-                  {queue.map(patient => (
-                    <div
-                      key={patient.patient_id}
-                      className="patient-bot-box"
-                      tabIndex={0}
-                      onMouseEnter={(e) => handleMouseEnter(patient, e)}
-                      onMouseLeave={handleMouseLeave}
+            {/* Two-Queue Filter Tabs */}
+            {(() => {
+              const emergencyQueue = queue.filter(p => p.priority === 'emergency' || p.urgency_detected);
+              const normalQueue = queue.filter(p => !emergencyQueue.includes(p));
+              const displayedQueue = activeQueueTab === 'emergency' ? emergencyQueue : activeQueueTab === 'normal' ? normalQueue : queue;
+
+              return (
+                <>
+                  <div className="queue-type-toggle" style={{ margin: '12px 0 16px 0' }}>
+                    <button
+                      type="button"
+                      className={`queue-type-btn ${activeQueueTab === 'all' ? 'active normal' : ''}`}
+                      onClick={() => setActiveQueueTab('all')}
                     >
-                      <div className="patient-bot-box__inner">
-                        <span className="patient-bot-box__pulse" />
-                        <Bot size={22} className="patient-bot-box__icon" />
-                        <span className="patient-bot-box__id">{patient.patient_id}</span>
+                      All Queues ({queue.length})
+                    </button>
+                    <button
+                      type="button"
+                      className={`queue-type-btn ${activeQueueTab === 'emergency' ? 'active emergency' : ''}`}
+                      onClick={() => setActiveQueueTab('emergency')}
+                      style={emergencyQueue.length > 0 && activeQueueTab !== 'emergency' ? { color: '#dc2626', fontWeight: 800 } : {}}
+                    >
+                      🔴 Emergency Queue ({emergencyQueue.length})
+                    </button>
+                    <button
+                      type="button"
+                      className={`queue-type-btn ${activeQueueTab === 'normal' ? 'active normal' : ''}`}
+                      onClick={() => setActiveQueueTab('normal')}
+                    >
+                      📋 Normal Queue ({normalQueue.length})
+                    </button>
+                  </div>
+
+                  {/* Queue Bots Grid */}
+                  <div className="queue-bots-container" style={{ overflow: 'visible' }}>
+                    {loadingQueue && queue.length === 0 ? (
+                      <div className="queue-empty-square-state">
+                        <RefreshCw size={24} className="spin text-slate-400" style={{ marginBottom: 12 }} />
+                        <p>Loading queue...</p>
                       </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+                    ) : displayedQueue.length === 0 ? (
+                      <div className="queue-empty-square-state">
+                        <Bot size={40} className="empty-bot-icon" />
+                        <h4>{activeQueueTab === 'emergency' ? 'No Emergency Patients' : 'No Patients in Queue'}</h4>
+                        <p>{activeQueueTab === 'emergency' ? 'No red flag emergency cases currently flagged.' : 'Register a patient on the left to add them to the queue.'}</p>
+                      </div>
+                    ) : (
+                      <div className="queue-bots-grid">
+                        {displayedQueue.map(patient => {
+                          const isEmerg = patient.priority === 'emergency' || patient.urgency_detected;
+                          return (
+                            <div
+                              key={patient.patient_id}
+                              className={`patient-bot-box ${isEmerg ? 'is-emergency' : ''}`}
+                              tabIndex={0}
+                              onMouseEnter={(e) => handleMouseEnter(patient, e)}
+                              onMouseLeave={handleMouseLeave}
+                            >
+                              <div className="patient-bot-box__inner">
+                                <span className="patient-bot-box__pulse" />
+                                <Bot size={22} className="patient-bot-box__icon" />
+                                <span className="patient-bot-box__id">{patient.patient_id}</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </section>
       </div>
 
       {/* ── Fixed Viewport Floating Details Popover (Always on Top of Everything) ── */}
-      {hoveredPatient && (
-        <div
-          className={`patient-fixed-popover ${popoverPos.showBelow ? 'show-below' : 'show-above'}`}
-          style={{
-            top: `${popoverPos.top}px`,
-            left: `${popoverPos.left}px`,
-            transform: popoverPos.showBelow ? 'translate(-50%, 0)' : 'translate(-50%, -100%)',
-          }}
-        >
-          <div className="bot-popover-header">
-            <div className="bot-popover-id-wrap">
-              <span className="bot-popover-id">{hoveredPatient.patient_id}</span>
-              <span className="queue-counter-badge__dot" />
-            </div>
-            <span className="bot-popover-status">In Queue</span>
-          </div>
-
-          <div className="bot-popover-name">{hoveredPatient.full_name}</div>
-          
-          <div className="bot-popover-meta">
-            <span>{hoveredPatient.age} yrs</span>
-            <span>·</span>
-            <span>{hoveredPatient.gender}</span>
-          </div>
-
-          <div className="bot-popover-details">
-            <div className="bot-popover-row">
-              <Phone size={12} className="bot-popover-icon" />
-              <span>{hoveredPatient.contact_number || 'No phone provided'}</span>
-            </div>
-            <div className="bot-popover-row">
-              <MapPin size={12} className="bot-popover-icon" />
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {hoveredPatient.address || 'No address provided'}
+      {hoveredPatient && (() => {
+        const isEmerg = hoveredPatient.priority === 'emergency' || hoveredPatient.urgency_detected;
+        return (
+          <div
+            className={`patient-fixed-popover ${popoverPos.showBelow ? 'show-below' : 'show-above'}`}
+            style={{
+              top: `${popoverPos.top}px`,
+              left: `${popoverPos.left}px`,
+              transform: popoverPos.showBelow ? 'translate(-50%, 0)' : 'translate(-50%, -100%)',
+              borderColor: isEmerg ? '#ef4444' : undefined,
+            }}
+          >
+            <div className="bot-popover-header">
+              <div className="bot-popover-id-wrap">
+                <span className="bot-popover-id" style={isEmerg ? { background: '#ef4444', color: '#fff' } : {}}>
+                  {hoveredPatient.patient_id}
+                </span>
+                <span className="queue-counter-badge__dot" style={isEmerg ? { background: '#ef4444' } : {}} />
+              </div>
+              <span className="bot-popover-status" style={isEmerg ? { color: '#dc2626', fontWeight: 800 } : {}}>
+                {isEmerg ? '🔴 EMERGENCY QUEUE' : 'In Queue'}
               </span>
             </div>
-          </div>
 
-          <div className="bot-popover-footer">
-            <Clock size={11} />
-            <span>Registered at {new Date(hoveredPatient.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+            {isEmerg && (
+              <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', color: '#991b1b', padding: '6px 8px', borderRadius: 6, fontSize: 11, fontWeight: 700, margin: '6px 0' }}>
+                🚨 RED FLAG DETECTED: Direct to Doctor Immediately
+              </div>
+            )}
+
+            <div className="bot-popover-name">{hoveredPatient.full_name}</div>
+            
+            <div className="bot-popover-meta">
+              <span>{hoveredPatient.age} yrs</span>
+              <span>·</span>
+              <span>{hoveredPatient.gender}</span>
+              {hoveredPatient.blood_group && <span>· 🩸 {hoveredPatient.blood_group}</span>}
+            </div>
+
+            <div className="bot-popover-details">
+              {hoveredPatient.chief_complaints && (
+                <div className="bot-popover-row" style={{ color: isEmerg ? '#b91c1c' : '#334155' }}>
+                  <AlertTriangle size={12} className="bot-popover-icon" color={isEmerg ? '#ef4444' : '#64748b'} />
+                  <span style={{ fontWeight: isEmerg ? 700 : 500 }}>{hoveredPatient.chief_complaints}</span>
+                </div>
+              )}
+              <div className="bot-popover-row">
+                <Phone size={12} className="bot-popover-icon" />
+                <span>{hoveredPatient.contact_number || 'No phone provided'}</span>
+              </div>
+              {hoveredPatient.email && (
+                <div className="bot-popover-row">
+                  <Mail size={12} className="bot-popover-icon" color="#059669" />
+                  <span style={{ color: '#047857', fontWeight: 600 }}>{hoveredPatient.email}</span>
+                </div>
+              )}
+              <div className="bot-popover-row">
+                <MapPin size={12} className="bot-popover-icon" />
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {hoveredPatient.address || 'No address provided'}
+                </span>
+              </div>
+            </div>
+
+            <div className="bot-popover-footer">
+              <Clock size={11} />
+              <span>Registered at {new Date(hoveredPatient.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </WorkerLayout>
   )
 }

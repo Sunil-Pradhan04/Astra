@@ -13,6 +13,8 @@ from app.core.prompts import (
     build_primary_question_prompt,
     DECIDE_NEXT_STEP_SYSTEM,
     build_decide_next_step_prompt,
+    URGENCY_VERIFICATION_SYSTEM,
+    build_urgency_verification_prompt,
 )
 
 SARVAM_BASE_URL = "https://api.sarvam.ai"
@@ -74,6 +76,73 @@ class SarvamAIService:
                 return res.json()["choices"][0]["message"]["content"].strip()
             else:
                 raise RuntimeError(f"Sarvam LLM Error {res.status_code}: {res.text}")
+
+    async def verify_urgency_signal(
+        self,
+        patient_text: str,
+        patient_text_en: str,
+        detected_concept: str,
+        matched_phrase: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Fast clinical LLM verification to differentiate genuine acute emergencies
+        from mild, chronic, benign, or non-urgent symptom mentions (e.g. 'mild heart pain').
+        Returns:
+            {
+                "is_true_emergency": bool,
+                "should_halt_interview": bool,
+                "severity": "critical" | "moderate" | "mild",
+                "reason": str
+            }
+        """
+        lower_en = (patient_text_en or "").lower()
+        lower_orig = (patient_text or "").lower()
+        mild_markers = ["mild", "slight", "minor", "a little", "thoda", "kam", "very little", "bearable", "halka", "alpa"]
+        is_explicitly_mild = any(m in lower_en or m in lower_orig for m in mild_markers)
+
+        try:
+            user_prompt = build_urgency_verification_prompt(
+                patient_text=patient_text,
+                patient_text_en=patient_text_en,
+                detected_concept=detected_concept,
+                matched_phrase=matched_phrase,
+            )
+            raw = await self.generate_completion(
+                system_prompt=URGENCY_VERIFICATION_SYSTEM,
+                user_prompt=user_prompt,
+                temperature=0.0,
+                max_tokens=300,
+            )
+            clean = raw.strip()
+            if clean.startswith("```json"):
+                clean = clean[7:]
+            elif clean.startswith("```"):
+                clean = clean[3:]
+            if clean.endswith("```"):
+                clean = clean[:-3]
+            clean = clean.strip()
+            data = json.loads(clean)
+            return {
+                "is_true_emergency": bool(data.get("is_true_emergency", not is_explicitly_mild)),
+                "should_halt_interview": bool(data.get("should_halt_interview", not is_explicitly_mild)),
+                "severity": data.get("severity", "mild" if is_explicitly_mild else "critical"),
+                "reason": data.get("reason", "LLM clinical urgency verification"),
+            }
+        except Exception as e:
+            print(f"[SarvamService] Urgency verification exception: {e}")
+            if is_explicitly_mild:
+                return {
+                    "is_true_emergency": False,
+                    "should_halt_interview": False,
+                    "severity": "mild",
+                    "reason": "Deterministic qualifier check flagged as mild symptom.",
+                }
+            return {
+                "is_true_emergency": True,
+                "should_halt_interview": True,
+                "severity": "critical",
+                "reason": f"Fallback to detector flag (LLM unreachable: {e})",
+            }
 
     async def translate(self, text: str, source_lang: str, target_lang: str = "en-IN") -> str:
         """

@@ -504,3 +504,50 @@ Example format: "माफ करें, मुझे आपकी बात स
 
 Respond with ONLY a JSON object:"""
 
+
+# ==============================================================================
+# SECTION 7: URGENCY & EMERGENCY SIGNAL CLINICAL VALIDATION PROMPTS
+# ==============================================================================
+
+URGENCY_VERIFICATION_SYSTEM = (
+    "You are an expert clinical triage emergency validation AI at a rural and primary healthcare kiosk. "
+    "A local keyword or NLP semantic detector flagged a potential urgency trigger word or phrase in a patient's statement. "
+    "Your job is to perform a fast clinical validation to distinguish genuine acute medical emergencies "
+    "from mild, chronic, benign, or non-urgent symptom mentions.\n\n"
+    "CRITICAL CLINICAL RULES:\n"
+    "1. TRUE EMERGENCY (is_true_emergency = true, should_halt_interview = true):\n"
+    "   - Severe, crushing, radiating chest pain, suspected acute myocardial infarction / heart attack,\n"
+    "     severe difficulty breathing / suffocating / choking, sudden syncope / collapse / unconsciousness,\n"
+    "     heavy uncontrolled bleeding, stroke signs (facial drooping, slurred speech, paralysis).\n"
+    "   - In these cases, the interview MUST halt immediately so the patient sees the emergency doctor.\n"
+    "2. NON-EMERGENCY / MOVE FORWARD (is_true_emergency = false, should_halt_interview = false):\n"
+    "   - Symptoms explicitly described as 'mild', 'slight', 'minor', 'a little', 'thoda', 'kam', or 'bearable'.\n"
+    "   - Chronic or long-standing duration (e.g., 'for 2 weeks', 'since 1 month', 'comes and goes for months').\n"
+    "   - Clearly benign or non-cardiac context (e.g., 'mild heart pain after spicy food', 'gas pain near heart', 'muscle strain', 'hurts when pressing').\n"
+    "   - In these cases, DO NOT HALT. The patient is clinically stable and the kiosk MUST MOVE FORWARD with the interview to collect more clinical details.\n\n"
+    "Respond with strict JSON ONLY:\n"
+    "{\n"
+    "  \"is_true_emergency\": boolean,\n"
+    "  \"should_halt_interview\": boolean,\n"
+    "  \"severity\": \"critical\" | \"moderate\" | \"mild\",\n"
+    "  \"reason\": \"Concise clinical rationale for decision\"\n"
+    "}"
+)
+
+def build_urgency_verification_prompt(
+    patient_text: str,
+    patient_text_en: str,
+    detected_concept: str,
+    matched_phrase: Optional[str] = None,
+) -> str:
+    """Builds prompt to clinically evaluate whether a flagged urgency signal is a true emergency or mild/routine."""
+    return (
+        f"Patient Statement (English translation): \"{patient_text_en}\"\n"
+        f"Patient Original Utterance: \"{patient_text}\"\n"
+        f"Triggered Urgency Concept: {detected_concept}\n"
+        f"Triggered Term / Phrase: {matched_phrase or 'Semantic match'}\n\n"
+        f"Evaluate whether this is a true acute emergency requiring immediate interview halt, or a mild/routine symptom where the interview should move forward.\n"
+        f"Respond with JSON ONLY:"
+    )
+
+

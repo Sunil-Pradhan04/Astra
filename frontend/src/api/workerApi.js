@@ -41,3 +41,61 @@ export const getPatientQueue = (hubId, status = 'all') => {
 
 export const getPatientDetail = (patientId) =>
   axios.get(`/patients/${patientId}`)
+
+// ── Mid-Level Health Worker Review & Doctor Queue Dispatch ─────────────
+export const getGroupedPatientQueues = (hubId, scope = 'pending_review') => {
+  const worker = JSON.parse(localStorage.getItem('worker_info') || '{}')
+  const activeHubId = hubId || worker.care_hub_id
+  return axios.get('/patients/queues/grouped', {
+    params: { hub_id: activeHubId, scope },
+  })
+}
+
+export const manualUpdatePatientReport = (patientId, data) =>
+  axios.patch(`/patients/${patientId}/manual-update`, data)
+
+export const aiUpdatePatientReport = (patientId, data) => {
+  const worker = JSON.parse(localStorage.getItem('worker_info') || '{}')
+  return axios.post(`/patients/${patientId}/ai-update`, {
+    ...data,
+    worker_id: data.worker_id || worker.worker_id || 'HW-DESK',
+    worker_name: data.worker_name || worker.full_name || 'Mid-Level Health Worker',
+  })
+}
+
+export const verifyPatientToDoctor = (patientId, data = {}) => {
+  const worker = JSON.parse(localStorage.getItem('worker_info') || '{}')
+  return axios.post(`/patients/${patientId}/verify-to-doctor`, {
+    ...data,
+    verified_by: data.verified_by || worker.worker_id || 'HW-VERIFIER',
+    verified_worker_name: data.verified_worker_name || worker.full_name || 'Mid-Level Health Worker',
+  })
+}
+
+export const requestPatientRescreen = (patientId, data = {}) => {
+  const worker = JSON.parse(localStorage.getItem('worker_info') || '{}')
+  return axios.post(`/patients/${patientId}/request-rescreen`, {
+    ...data,
+    worker_id: data.worker_id || worker.worker_id || 'HW-DESK',
+    worker_name: data.worker_name || worker.full_name || 'Mid-Level Health Worker',
+  })
+}
+
+export const getDoctorsQueues = (hubId) => {
+  const worker = JSON.parse(localStorage.getItem('worker_info') || '{}')
+  const activeHubId = hubId || worker.care_hub_id
+  return axios.get('/doctors/queues', {
+    params: { hub_id: activeHubId },
+  })
+}
+
+export const dispensePatientMedicine = (patientId) => {
+  const worker = JSON.parse(localStorage.getItem('worker_info') || '{}')
+  return axios.post(`/doctors/desk/dispense/${patientId}`, null, {
+    params: {
+      worker_name: worker.full_name || 'Pharmacist',
+      worker_id: worker.worker_id || 'HW-PHARMACY',
+    },
+  })
+}
+

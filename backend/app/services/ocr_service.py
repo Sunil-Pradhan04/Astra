@@ -13,6 +13,7 @@ import os
 import uuid
 import json
 import re
+import asyncio
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple, List
 
@@ -109,6 +110,7 @@ class OCRService:
                     from paddlex.inference.models.runners.paddle_static.runner import PaddleStaticRunner
                     orig_create = PaddleStaticRunner._create
                     def _safe_create(runner_self):
+                        runner_self._config['run_mode'] = 'paddle'
                         runner_self._config['enable_new_ir'] = False
                         return orig_create(runner_self)
                     PaddleStaticRunner._create = _safe_create
@@ -119,7 +121,12 @@ class OCRService:
                     print(f"[OCRService] Compatibility patch info: {patch_e}")
 
                 from paddleocr import PaddleOCR
-                self._paddle_ocr = PaddleOCR(use_textline_orientation=True, lang="en")
+                self._paddle_ocr = PaddleOCR(
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=False,
+                    lang="en"
+                )
             except Exception as e:
                 print(f"[OCRService] PaddleOCR initialization error: {e}")
                 try:
@@ -127,7 +134,7 @@ class OCRService:
                     self._paddle_ocr = PaddleOCR(lang="en")
                 except Exception as e2:
                     print(f"[OCRService] Secondary PaddleOCR init error: {e2}")
-                    raise RuntimeError(f"Could not initialize PaddleOCR: {e2}")
+                    self._paddle_ocr = None
         return self._paddle_ocr
 
     # =========================================================================
@@ -354,13 +361,37 @@ class OCRService:
         }
         """
         ocr = self._get_paddle_ocr()
+        if ocr is None:
+            return {
+                "validation_passed": False,
+                "raw_text": "",
+                "avg_confidence": 0.0,
+                "line_items": [],
+                "error_reason": "OCR engine not available",
+            }
+
         np_arr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return {
+                "validation_passed": False,
+                "raw_text": "",
+                "avg_confidence": 0.0,
+                "line_items": [],
+                "error_reason": "Could not decode image bytes",
+            }
+
+        # Downscale large images (max dim 960) to prevent CPU stalls
+        h, w = img.shape[:2]
+        max_dim = max(h, w)
+        if max_dim > 960:
+            scale = 960.0 / max_dim
+            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
         try:
             result = ocr.ocr(img)
         except Exception as e:
-            print(f"[OCRService] PaddleOCR execution error: {e}")
+            print(f"[OCRService] PaddleOCR execution warning: {e}")
             return {
                 "validation_passed": False,
                 "raw_text": "",
@@ -536,8 +567,67 @@ class OCRService:
         )
         image_url = cloudinary_url if cloudinary_url else local_url
 
-        # 3. Extract Text via PaddleOCR & Clinical Validation
-        ocr_result = self.extract_text_paddle(image_bytes)
+        # 3. Classify Document: Printed vs Handwritten
+        classification, classifier_conf, classification_details = self.classify_document(image_bytes)
+
+        # If document is handwritten, bypass OCR text extraction immediately to avoid
+        # CPU stalls and hallucinations, and attach document directly for doctor visual review (Path C)
+        if classification == "handwritten":
+            structured_handwritten = {
+                "report_type": "Handwritten Doctor Prescription",
+                "is_handwritten": True,
+                "attached_image": image_url,
+                "cloudinary_url": cloudinary_url,
+                "review_notice": "Handwritten doctor prescription attached for direct visual clinical review. OCR bypassed to avoid clinical transcription errors.",
+            }
+            status_msg = "Handwritten prescription detected. OCR text extraction safely bypassed; original document attached to final summary for qualified visual review."
+
+            record = PrescriptionRecord(
+                record_id=record_id,
+                patient_id=patient_id,
+                care_hub_id=care_hub_id,
+                device_id=device_id,
+                session_id=session_id,
+                image_url=image_url,
+                image_filename=unique_name,
+                image_path=file_path,
+                file_size_bytes=len(image_bytes),
+                quality_metrics=quality_metrics,
+                is_quality_passed=True,
+                classification="handwritten",
+                classifier_confidence=round(classifier_conf, 2),
+                ocr_text=None,
+                ocr_confidence=None,
+                structured_data=structured_handwritten,
+                processing_status="handwritten_human_review_required",
+                status_message=status_msg,
+            )
+            await record.insert()
+            await self._merge_into_patient(patient_id, record)
+
+            return {
+                "success": True,
+                "record_id": record_id,
+                "classification": "handwritten",
+                "is_handwritten": True,
+                "classifier_confidence": round(classifier_conf, 2),
+                "processing_status": "handwritten_human_review_required",
+                "message": "Handwritten prescription attached directly to clinical summary for doctor review.",
+                "image_url": image_url,
+                "cloudinary_url": cloudinary_url,
+                "structured_data": structured_handwritten,
+            }
+
+        # 4. Printed Document: Extract Text via PaddleOCR in background thread with 10s timeout
+        try:
+            ocr_result = await asyncio.wait_for(
+                asyncio.to_thread(self.extract_text_paddle, image_bytes),
+                timeout=10.0,
+            )
+        except Exception as ocr_err:
+            print(f"[OCRService] PaddleOCR background thread error or timeout: {ocr_err}")
+            ocr_result = {"validation_passed": False, "raw_text": "", "avg_confidence": 0.0, "line_items": []}
+
         raw_text = (ocr_result.get("raw_text") or "").strip()
         avg_conf = float(ocr_result.get("avg_confidence") or 0.0)
         is_medical, match_count, matched_kws = self.check_medical_document_content(raw_text)

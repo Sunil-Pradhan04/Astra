@@ -26,12 +26,15 @@ export default function PrescriptionCameraModal({
   language,
   onSuccess,
   onSkip,
+  onClose,
   playAudio,
 }) {
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
   const streamRef = useRef(null)
   const countdownIntervalRef = useRef(null)
+
+  const isModalOpen = isOpen !== undefined ? Boolean(isOpen) : true
 
   const [cameraActive, setCameraActive] = useState(false)
   const [cameraError, setCameraError] = useState('')
@@ -272,9 +275,12 @@ export default function PrescriptionCameraModal({
       const data = res.data
       clearTimeout(t1); clearTimeout(t2); clearTimeout(t3)
 
-      if (!data.success) {
+      // Rejection only happens if backend explicitly returns success === false
+      const isRejected = data.success === false || data.action_required === 'retake_photo'
+
+      if (isRejected) {
         // Quality rejected → play audio, show reason, reset to live camera
-        setQualityRejection(data.translated_message || data.message)
+        setQualityRejection(data.translated_message || data.message || 'Image was unclear. Please hold document steady and recapture.')
         setIsUploading(false)
         if (data.audio_base64 && playAudio) playAudio(data.audio_base64)
         setPreviewUrl(null)
@@ -282,7 +288,10 @@ export default function PrescriptionCameraModal({
         startCamera()
       } else {
         stopCamera()
-        onSuccess(data)
+        setIsUploading(false)
+        if (typeof onSuccess === 'function') {
+          onSuccess(data)
+        }
       }
     } catch (err) {
       clearTimeout(t1); clearTimeout(t2); clearTimeout(t3)
@@ -313,7 +322,7 @@ export default function PrescriptionCameraModal({
   }
 
   useEffect(() => {
-    if (isOpen) {
+    if (isModalOpen) {
       setQualityRejection(null)
       setPreviewUrl(null)
       setCapturedBlob(null)
@@ -322,9 +331,18 @@ export default function PrescriptionCameraModal({
       stopCamera()
     }
     return () => stopCamera()
-  }, [isOpen])
+  }, [isModalOpen])
 
-  if (!isOpen) return null
+  if (!isModalOpen) return null
+
+  const handleCloseModal = () => {
+    stopCamera()
+    if (typeof onClose === 'function') {
+      onClose()
+    } else {
+      handleSkip()
+    }
+  }
 
   return (
     <div className="cp-modal-backdrop fade-in" style={{ zIndex: 1200 }}>
@@ -347,7 +365,7 @@ export default function PrescriptionCameraModal({
               </p>
             </div>
           </div>
-          <button className="rx-camera-close" onClick={handleSkip} disabled={isUploading} title="Skip — continue without document">
+          <button className="rx-camera-close" onClick={handleCloseModal} disabled={isUploading} title="Close / Continue without document">
             <X size={18} />
           </button>
         </div>

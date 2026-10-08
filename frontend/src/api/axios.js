@@ -9,6 +9,7 @@ const api = axios.create({
 api.interceptors.request.use((config) => {
   const adminToken = localStorage.getItem('admin_token')
   const workerToken = localStorage.getItem('worker_token')
+  const doctorToken = localStorage.getItem('doctor_token')
   const deviceToken = localStorage.getItem('device_token')
 
   let token = null
@@ -17,12 +18,14 @@ api.interceptors.request.use((config) => {
 
   if (url.includes('/kiosk') || pathname.startsWith('/device') || pathname.startsWith('/endpoint-device')) {
     token = deviceToken || adminToken
-  } else if (pathname.startsWith('/health-worker') || url.includes('/health-worker') || url.includes('/patients')) {
+  } else if (pathname.startsWith('/doctor') || url.includes('/doctors/desk')) {
+    token = doctorToken || adminToken
+  } else if (pathname.startsWith('/health-worker') || url.includes('/health-worker') || (url.includes('/patients') && !pathname.startsWith('/doctor'))) {
     token = workerToken || adminToken
   } else if (pathname.startsWith('/admin') || url.includes('/care-hub') || url.includes('/doctors') || url.includes('/health-workers') || url.includes('/endpoint-devices') || url.includes('/communicate') || url.includes('/settings')) {
     token = adminToken
   } else {
-    token = adminToken || workerToken || deviceToken
+    token = doctorToken || workerToken || adminToken || deviceToken
   }
 
   if (token && !config.headers.Authorization) {
@@ -37,7 +40,11 @@ api.interceptors.response.use(
   (err) => {
     const isLoginRequest = err.config?.url?.includes('/auth/')
     if (err.response?.status === 401 && !isLoginRequest) {
-      if (window.location.pathname.startsWith('/health-worker')) {
+      if (window.location.pathname.startsWith('/doctor')) {
+        localStorage.removeItem('doctor_token')
+        localStorage.removeItem('doctor_info')
+        window.location.href = '/login'
+      } else if (window.location.pathname.startsWith('/health-worker')) {
         localStorage.removeItem('worker_token')
         localStorage.removeItem('worker_info')
         window.location.href = '/login/health-worker'

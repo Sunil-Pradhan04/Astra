@@ -8,6 +8,7 @@ from datetime import datetime
 class DoctorCreate(BaseModel):
     full_name: str
     email: EmailStr
+    role: str = "medicine_specialist"    # intern_doctor | medicine_specialist | specialist
     specialization: Optional[str] = None
 
 
@@ -15,7 +16,8 @@ class DoctorOut(BaseModel):
     doctor_id: str
     full_name: str
     email: str
-    specialization: Optional[str]
+    role: str = "medicine_specialist"
+    specialization: Optional[str] = None
     is_online: bool
     created_at: datetime
 
