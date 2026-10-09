@@ -31,19 +31,30 @@ import {
   MapPin,
   ArrowRight,
   ShieldCheck,
+  Compass,
 } from 'lucide-react'
 import {
   getDoctorDeskQueue,
   submitDoctorPrescription,
   doctorHeartbeat,
   doctorLogout,
-  askDoctorInterrogationChatbot,
   getInternalDoctors,
   referPatientInternal,
   generateAiReferralNote,
   referPatientExternal,
+  getNearbyFacilities,
 } from '../../api/doctorApi'
+import PrintedReferralForm from '../../components/referral/PrintedReferralForm'
+import FacilitiesMapRadar from '../../components/referral/FacilitiesMapRadar'
 import './DoctorDeskPage.css'
+
+const extractErrorMessage = (err, fallback) => {
+  const d = err?.response?.data?.detail
+  if (typeof d === 'string') return d
+  if (Array.isArray(d)) return d.map((x) => x.msg || JSON.stringify(x)).join(', ')
+  if (d && typeof d === 'object') return d.message || JSON.stringify(d)
+  return err?.message || fallback
+}
 
 const DEFAULT_MEDICINE = {
   name: '',
@@ -190,6 +201,7 @@ export default function DoctorDeskPage() {
 
   // ── Clinical Referral State (Inside Hospital & Hospital-to-Another) ──
   const [isReferralModalOpen, setIsReferralModalOpen] = useState(false)
+  const [isSlipViewerOpen, setIsSlipViewerOpen] = useState(false)
   const [referralTab, setReferralTab] = useState('inside') // 'inside' | 'external'
   const [referralActionMsg, setReferralActionMsg] = useState(null)
 
@@ -210,6 +222,25 @@ export default function DoctorDeskPage() {
   const [aiReferralNote, setAiReferralNote] = useState('')
   const [generatingAiNote, setGeneratingAiNote] = useState(false)
   const [submittingExternal, setSubmittingExternal] = useState(false)
+  const [showDocFacilityMap, setShowDocFacilityMap] = useState(false)
+  const [docNearbyFacilities, setDocNearbyFacilities] = useState([])
+  const [docFacilityRadius, setDocFacilityRadius] = useState(20)
+  const [docFacilityType, setDocFacilityType] = useState('all')
+  const [docFacilitySearch, setDocFacilitySearch] = useState('')
+  const [selectedTargetFacilityId, setSelectedTargetFacilityId] = useState('')
+
+  const fetchDocNearbyFacilities = async (targetRadius = docFacilityRadius, targetType = docFacilityType, searchQ = docFacilitySearch) => {
+    try {
+      const params = {}
+      if (targetRadius && targetRadius > 0) params.radius_km = targetRadius
+      if (targetType && targetType !== 'all') params.facility_type = targetType
+      if (searchQ && searchQ.trim()) params.search = searchQ.trim()
+      const res = await getNearbyFacilities(params)
+      setDocNearbyFacilities(res.data?.facilities || [])
+    } catch (err) {
+      console.warn('Failed to load nearby facilities for doctor:', err)
+    }
+  }
 
   const fetchInternalDoctorsList = async () => {
     setLoadingInternalDocs(true)
@@ -225,6 +256,22 @@ export default function DoctorDeskPage() {
       console.warn('Failed to load internal doctors:', err)
     } finally {
       setLoadingInternalDocs(false)
+    }
+  }
+
+  const handleOpenReferralModal = () => {
+    setIsReferralModalOpen(true)
+    fetchInternalDoctorsList()
+    if (!externalDiagnosis && diagnosis) {
+      setExternalDiagnosis(diagnosis)
+    }
+    if (selectedPatient?.external_referral) {
+      const ext = selectedPatient.external_referral
+      if (ext.reason_for_referral) setExternalReason(ext.reason_for_referral)
+      if (ext.possible_diagnosis) setExternalDiagnosis(ext.possible_diagnosis)
+      if (ext.urgency) setExternalUrgency(ext.urgency)
+      const note = ext.final_referral_note || ext.updated_referral_note || ext.ai_referral_note
+      if (note) setAiReferralNote(note)
     }
   }
 
@@ -252,7 +299,7 @@ export default function DoctorDeskPage() {
       setInternalNotes('')
       fetchQueue()
     } catch (err) {
-      alert(err.response?.data?.detail || 'Failed to complete internal transfer.')
+      alert(extractErrorMessage(err, 'Failed to complete internal transfer.'))
     } finally {
       setSubmittingInternal(false)
     }
@@ -274,7 +321,7 @@ export default function DoctorDeskPage() {
       })
       setAiReferralNote(res.data?.ai_referral_note || '')
     } catch (err) {
-      alert(err.response?.data?.detail || 'Failed to generate AI referral note.')
+      alert(extractErrorMessage(err, 'Failed to generate AI referral note.'))
     } finally {
       setGeneratingAiNote(false)
     }
@@ -314,7 +361,7 @@ export default function DoctorDeskPage() {
       setAiReferralNote('')
       fetchQueue()
     } catch (err) {
-      alert(err.response?.data?.detail || 'Failed to submit external referral.')
+      alert(extractErrorMessage(err, 'Failed to submit external referral.'))
     } finally {
       setSubmittingExternal(false)
     }
@@ -322,47 +369,6 @@ export default function DoctorDeskPage() {
 
   // AI Interrogation Drawer state
   const [isAiDrawerOpen, setIsAiDrawerOpen] = useState(false)
-  const [drawerActiveTab, setDrawerActiveTab] = useState('chat') // 'chat' | 'transcript'
-  const [aiDoctorMessage, setAiDoctorMessage] = useState('')
-  const [isDoctorAiProcessing, setIsDoctorAiProcessing] = useState(false)
-  const [doctorAiHistory, setDoctorAiHistory] = useState([])
-
-  const handleSendDoctorAiQuery = async (customMessage) => {
-    const textToSend = (customMessage || aiDoctorMessage).trim()
-    if (!textToSend || !selectedPatient || isDoctorAiProcessing) return
-
-    setIsDoctorAiProcessing(true)
-    setAiDoctorMessage('')
-
-    try {
-      const res = await askDoctorInterrogationChatbot(selectedPatient.patient_id, textToSend)
-      const data = res.data || {}
-      setDoctorAiHistory((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(),
-          timestamp: new Date().toISOString(),
-          message: textToSend,
-          ai_reply: data.reply || 'Clinical interrogation response generated.',
-          citations: data.citations || [],
-        },
-      ])
-    } catch (err) {
-      console.warn('Doctor AI RAG query error:', err)
-      setDoctorAiHistory((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(),
-          timestamp: new Date().toISOString(),
-          message: textToSend,
-          ai_reply: `No response from conversation vector service. Fallback triage summary for ${selectedPatient.full_name}: "${selectedPatient.chief_complaints}".`,
-          citations: [],
-        },
-      ])
-    } finally {
-      setIsDoctorAiProcessing(false)
-    }
-  }
 
   // Fetch queues from backend
   const fetchQueue = async () => {
@@ -833,10 +839,7 @@ export default function DoctorDeskPage() {
                   {/* Refer Patient Button */}
                   <button
                     type="button"
-                    onClick={() => {
-                      setIsReferralModalOpen(true)
-                      fetchInternalDoctorsList()
-                    }}
+                    onClick={handleOpenReferralModal}
                     className="btn-doc-logout"
                     style={{ background: '#4338ca', color: '#ffffff', borderColor: '#4338ca', fontWeight: 700 }}
                     title="Refer this patient to another doctor in this hospital or to an external hospital facility"
@@ -850,10 +853,10 @@ export default function DoctorDeskPage() {
                     onClick={() => setIsAiDrawerOpen(true)}
                     className="btn-doc-logout"
                     style={{ background: '#0f172a', color: '#ffffff', borderColor: '#0f172a' }}
-                    title="Inspect patient interrogation dialogue or ask AI about disclosures"
+                    title="Inspect patient interrogation dialogue transcript"
                   >
-                    <Sparkles size={13} />
-                    <span>Interrogate Case & AI Q&A</span>
+                    <FileText size={13} />
+                    <span>View Kiosk Transcript</span>
                   </button>
                 </div>
               </div>
@@ -924,6 +927,27 @@ export default function DoctorDeskPage() {
                       )}
                     </div>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsSlipViewerOpen(true)}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      background: '#92400e',
+                      color: '#ffffff',
+                      border: 'none',
+                      borderRadius: 6,
+                      padding: '5px 12px',
+                      fontSize: 11.5,
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    <FileText size={13} />
+                    <span>View Printed Slip</span>
+                  </button>
                   <span style={{ fontSize: 11, fontWeight: 800, background: '#fef3c7', color: '#92400e', padding: '3px 8px', borderRadius: 4 }}>
                     {selectedPatient.external_referral.urgency?.toUpperCase() || 'URGENT'}
                   </span>
@@ -2247,6 +2271,73 @@ export default function DoctorDeskPage() {
                   </div>
                 </div>
 
+                {/* Optional Healthcare Facilities Map Radar */}
+                <div style={{ marginBottom: 18 }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !showDocFacilityMap
+                      setShowDocFacilityMap(next)
+                      if (next && docNearbyFacilities.length === 0) {
+                        fetchDocNearbyFacilities(docFacilityRadius, docFacilityType, docFacilitySearch)
+                      }
+                    }}
+                    style={{
+                      background: showDocFacilityMap ? '#4338ca' : '#f8fafc',
+                      color: showDocFacilityMap ? '#ffffff' : '#4338ca',
+                      border: '1.5px solid #c7d2fe',
+                      borderRadius: 8,
+                      padding: '8px 14px',
+                      fontSize: 12.5,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 7,
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    <Compass size={15} />
+                    <span>{showDocFacilityMap ? 'Hide Healthcare Facilities Map' : '🗺️ View Healthcare Facilities Map Radar (Radius & Pins)'}</span>
+                  </button>
+
+                  {showDocFacilityMap && (
+                    <div style={{ marginTop: 12 }}>
+                      <FacilitiesMapRadar
+                        origin={{
+                          latitude: 20.2961,
+                          longitude: 85.8245,
+                          name: doctorInfo?.care_hub_name || 'Government Hospital (Referring Hub)',
+                        }}
+                        facilities={docNearbyFacilities}
+                        selectedFacilityId={selectedTargetFacilityId}
+                        onSelectFacility={(id) => {
+                          setSelectedTargetFacilityId(id)
+                          const f = docNearbyFacilities.find((fac) => fac.id === id)
+                          if (f) {
+                            setExternalReason((prev) => prev ? prev : `Referral to ${f.name} for specialized care`)
+                          }
+                        }}
+                        radiusKm={docFacilityRadius}
+                        facilityType={docFacilityType}
+                        onRadiusChange={(r) => {
+                          setDocFacilityRadius(r)
+                          fetchDocNearbyFacilities(r, docFacilityType, docFacilitySearch)
+                        }}
+                        onTypeChange={(t) => {
+                          setDocFacilityType(t)
+                          fetchDocNearbyFacilities(docFacilityRadius, t, docFacilitySearch)
+                        }}
+                        searchQuery={docFacilitySearch}
+                        onSearchChange={(q) => {
+                          setDocFacilitySearch(q)
+                          fetchDocNearbyFacilities(docFacilityRadius, docFacilityType, q)
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+
                 {/* AI Referral Note Generator Trigger */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                   <label style={{ fontSize: 12.5, fontWeight: 800, color: '#0f172a', textTransform: 'uppercase' }}>
@@ -2284,27 +2375,34 @@ export default function DoctorDeskPage() {
                   </button>
                 </div>
 
-                {/* AI Generated Note Textarea */}
+                {/* AI Generated Note - Official Printed Form View */}
                 <div style={{ marginBottom: 20 }}>
-                  <textarea
-                    rows={8}
-                    required
-                    placeholder="Click '✨ Generate AI Referral Note' above or compose the referral memorandum..."
-                    value={aiReferralNote}
-                    onChange={(e) => setAiReferralNote(e.target.value)}
-                    style={{
-                      width: '100%',
-                      padding: '12px 14px',
-                      borderRadius: 8,
-                      border: '1.5px solid #cbd5e1',
-                      fontSize: 12.5,
-                      lineHeight: 1.6,
-                      fontFamily: 'monospace',
-                      background: aiReferralNote ? '#f8fafc' : '#ffffff',
+                  <div style={{ fontSize: 12, fontWeight: 700, color: '#475569', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <FileText size={14} color="#4338ca" />
+                    <span>Official Medical Referral Memorandum Slip (Printed Form UI):</span>
+                  </div>
+
+                  <PrintedReferralForm
+                    patient={selectedPatient}
+                    referralData={{
+                      reason_for_referral: externalReason,
+                      possible_diagnosis: externalDiagnosis,
+                      urgency: externalUrgency,
+                      referring_doctor_name: doctorInfo?.full_name || 'Attending Physician',
+                      referring_doctor_role: doctorInfo?.role || 'Specialist',
+                      referring_facility_name: doctorInfo?.care_hub_name || 'Government Hospital',
                     }}
+                    rawNote={aiReferralNote}
+                    onNoteChange={setAiReferralNote}
+                    editable={true}
+                    showPrintButton={true}
                   />
-                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>
-                    Tip: Health Worker can also update transport protocols and ambulance escort details during review.
+
+                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <ShieldCheck size={14} color="#059669" />
+                    <span>
+                      Tip: You can switch to "Edit Raw Text" above to refine details, or click "Print Official Slip" to generate an authentic paper transfer form.
+                    </span>
                   </div>
                 </div>
 
@@ -2327,7 +2425,7 @@ export default function DoctorDeskPage() {
                     {submittingExternal ? (
                       <>
                         <RefreshCw size={14} className="animate-spin" />
-                        <span>Submitting...</span>
+                        <span>Submitting Referral...</span>
                       </>
                     ) : (
                       <>
@@ -2339,6 +2437,90 @@ export default function DoctorDeskPage() {
                 </div>
               </form>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Standalone Official Referral Slip Viewer Modal ── */}
+      {isSlipViewerOpen && selectedPatient && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.75)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 125,
+            padding: 20,
+            backdropFilter: 'blur(4px)',
+          }}
+          onClick={() => setIsSlipViewerOpen(false)}
+        >
+          <div
+            style={{
+              background: '#ffffff',
+              color: '#0f172a',
+              width: '940px',
+              maxWidth: '96vw',
+              maxHeight: '94vh',
+              overflowY: 'auto',
+              borderRadius: 14,
+              padding: '24px 28px',
+              boxShadow: '0 25px 60px rgba(0, 0, 0, 0.4)',
+              border: '2px solid #0f172a',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1.5px solid #e2e8f0', paddingBottom: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ background: '#0f172a', color: '#fff', borderRadius: 8, padding: 6, display: 'flex' }}>
+                  <FileText size={18} />
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: '#0f172a' }}>
+                    Official Medical Referral Memorandum Slip
+                  </h3>
+                  <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+                    Patient: <strong>{selectedPatient?.full_name || 'Patient'}</strong> ({selectedPatient?.patient_id || 'ID'})
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsSlipViewerOpen(false)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: 6,
+                  color: '#64748b',
+                }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <PrintedReferralForm
+              patient={selectedPatient || {}}
+              referralData={{
+                ...(selectedPatient?.external_referral || {}),
+                reason_for_referral: selectedPatient?.external_referral?.reason_for_referral || externalReason,
+                possible_diagnosis: selectedPatient?.external_referral?.possible_diagnosis || externalDiagnosis,
+                urgency: selectedPatient?.external_referral?.urgency || externalUrgency,
+                referring_doctor_name: selectedPatient?.external_referral?.referring_doctor_name || doctorInfo?.full_name,
+                referring_facility_name: selectedPatient?.external_referral?.referring_care_hub_name || doctorInfo?.care_hub_name,
+              }}
+              rawNote={
+                selectedPatient?.external_referral?.final_referral_note ||
+                selectedPatient?.external_referral?.updated_referral_note ||
+                selectedPatient?.external_referral?.ai_referral_note ||
+                aiReferralNote
+              }
+              onNoteChange={setAiReferralNote}
+              editable={true}
+              showPrintButton={true}
+            />
           </div>
         </div>
       )}
@@ -2357,10 +2539,10 @@ export default function DoctorDeskPage() {
             <div className="hw-ai-drawer-header">
               <div className="hw-ai-drawer-title">
                 <div style={{ width: 34, height: 34, borderRadius: 8, background: '#0f172a', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <Sparkles size={17} />
+                  <FileText size={17} />
                 </div>
                 <div>
-                  <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>Case Interrogation & Clinical Q&A</h3>
+                  <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>Patient Interrogation Transcript</h3>
                   <div style={{ fontSize: 11.5, color: '#64748b', fontWeight: 600 }}>
                     {selectedPatient.full_name} ({selectedPatient.patient_id})
                   </div>
@@ -2376,160 +2558,35 @@ export default function DoctorDeskPage() {
               </button>
             </div>
 
-            {/* Tabs */}
-            <div className="hw-ai-drawer-tabs">
-              <button
-                type="button"
-                className={`hw-ai-drawer-tab ${drawerActiveTab === 'transcript' ? 'active' : ''}`}
-                onClick={() => setDrawerActiveTab('transcript')}
-              >
-                <FileText size={13} />
-                <span>Interrogation Transcript</span>
-              </button>
-              <button
-                type="button"
-                className={`hw-ai-drawer-tab ${drawerActiveTab === 'chat' ? 'active' : ''}`}
-                onClick={() => setDrawerActiveTab('chat')}
-              >
-                <Bot size={13} />
-                <span>Ask AI About Case</span>
-              </button>
-            </div>
-
-            {/* Body */}
-            {drawerActiveTab === 'transcript' ? (
-              <div className="hw-ai-drawer-body">
-                <div className="hw-ai-drawer-hint">
-                  🗣️ <strong>Patient Kiosk Interrogation Dialogue:</strong> Exact questions asked and verbatim disclosures given by {selectedPatient.full_name} during automated triage.
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  {(() => {
-                    const turns = getInterrogationTurns(selectedPatient)
-                    if (turns.length === 0) {
-                      return (
-                        <div style={{ textAlign: 'center', padding: '30px', color: '#64748b', fontSize: 13 }}>
-                          No dialogue turns recorded.
-                        </div>
-                      )
-                    }
-                    return turns.map((t, idx) => (
-                      <div key={idx} className="hw-dialogue-card">
-                        <div className="hw-dialogue-q">
-                          <span>Q{idx + 1}: {t.question || 'Interrogation Inquiry'}</span>
-                        </div>
-                        <div className="hw-dialogue-a">
-                          "{t.answer || t.patient_answer_en || t.patient_answer || 'No response recorded'}"
-                        </div>
-                      </div>
-                    ))
-                  })()}
-                </div>
+            {/* Body: Verbatim Interrogation Transcript */}
+            <div className="hw-ai-drawer-body">
+              <div className="hw-ai-drawer-hint">
+                🗣️ <strong>Patient Kiosk Interrogation Dialogue:</strong> Exact questions asked and verbatim disclosures given by {selectedPatient.full_name} during automated triage.
               </div>
-            ) : (
-              <div className="hw-ai-drawer-body">
-                <div className="hw-ai-drawer-hint">
-                  💬 <strong>RAG Interrogation Chatbot:</strong> Ask any specific question regarding what {selectedPatient.full_name} said during their live kiosk session. Astra AI retrieves the exact real questions and real patient answers from the <code>astra-conversation</code> vector database.
-                </div>
 
-                {/* Quick Chips */}
-                <div className="hw-ai-drawer-chips">
-                  <button
-                    type="button"
-                    className="hw-drawer-chip"
-                    onClick={() => handleSendDoctorAiQuery('What did the patient say about fever timing and evening chills?')}
-                  >
-                    ❓ Fever timing & evening chills?
-                  </button>
-                  <button
-                    type="button"
-                    className="hw-drawer-chip"
-                    onClick={() => handleSendDoctorAiQuery('Did the patient disclose any chest pain or radiating discomfort?')}
-                  >
-                    ❓ Any chest pain or radiation?
-                  </button>
-                  <button
-                    type="button"
-                    className="hw-drawer-chip"
-                    onClick={() => handleSendDoctorAiQuery('What medications and chronic conditions does the patient take?')}
-                  >
-                    ❓ Medications & chronic history?
-                  </button>
-                  <button
-                    type="button"
-                    className="hw-drawer-chip"
-                    onClick={() => handleSendDoctorAiQuery('How long have the symptoms lasted and what relieves or worsens them?')}
-                  >
-                    ❓ Duration, relieving & aggravating factors?
-                  </button>
-                </div>
-
-                {/* Chat Feed */}
-                <div className="hw-chat-thread">
-                  {doctorAiHistory.length === 0 ? (
-                    <div style={{ textAlign: 'center', padding: '36px 16px', color: '#64748b' }}>
-                      <Bot size={36} style={{ margin: '0 auto 10px', opacity: 0.4 }} />
-                      <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>
-                        Interrogation Q&A Ready
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {(() => {
+                  const turns = getInterrogationTurns(selectedPatient)
+                  if (turns.length === 0) {
+                    return (
+                      <div style={{ textAlign: 'center', padding: '30px', color: '#64748b', fontSize: 13 }}>
+                        No dialogue turns recorded.
                       </div>
-                      <div style={{ fontSize: 12, marginTop: 4, lineHeight: 1.4 }}>
-                        Ask questions about {selectedPatient.full_name}'s real interrogation dialogue, timing, answers, or medical disclosures.
+                    )
+                  }
+                  return turns.map((t, idx) => (
+                    <div key={idx} className="hw-dialogue-card">
+                      <div className="hw-dialogue-q">
+                        <span>Q{idx + 1}: {t.question || 'Interrogation Inquiry'}</span>
+                      </div>
+                      <div className="hw-dialogue-a">
+                        "{t.answer || t.patient_answer_en || t.patient_answer || 'No response recorded'}"
                       </div>
                     </div>
-                  ) : (
-                    doctorAiHistory.map((item, idx) => (
-                      <div key={item.id || idx} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        <div className="hw-chat-msg-worker">
-                          {item.message}
-                        </div>
-                        <div className="hw-chat-msg-ai">
-                          <div
-                            style={{
-                              lineHeight: 1.65,
-                              fontSize: 13,
-                              whiteSpace: 'pre-line',
-                              color: '#0f172a',
-                            }}
-                          >
-                            {item.ai_reply}
-                          </div>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-
-                {/* Footer Input Bar */}
-                <div className="hw-ai-drawer-footer">
-                  <input
-                    type="text"
-                    className="hw-drawer-input"
-                    placeholder="Ask about patient disclosures (e.g. 'Did patient report shortness of breath?')..."
-                    value={aiDoctorMessage}
-                    onChange={(e) => setAiDoctorMessage(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleSendDoctorAiQuery()
-                    }}
-                    disabled={isDoctorAiProcessing}
-                  />
-                  <button
-                    type="button"
-                    className="hw-drawer-send-btn"
-                    onClick={() => handleSendDoctorAiQuery()}
-                    disabled={isDoctorAiProcessing || !aiDoctorMessage.trim()}
-                  >
-                    {isDoctorAiProcessing ? (
-                      <RefreshCw size={14} className="animate-spin" />
-                    ) : (
-                      <>
-                        <Send size={13} />
-                        <span>Ask</span>
-                      </>
-                    )}
-                  </button>
-                </div>
+                  ))
+                })()}
               </div>
-            )}
+            </div>
           </div>
         </div>
       )}

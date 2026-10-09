@@ -129,7 +129,7 @@ CLINICAL_GAP_ANALYSIS_SYSTEM = (
     "6. PRIOR MEDICATIONS & MEDICAL HISTORY: Has the patient taken any medicines (e.g. Paracetamol, antibiotics), and do they have chronic conditions (e.g. hypertension, diabetes)?\n\n"
     "CRITICAL RULES:\n"
     "- If the patient ALREADY clearly stated any of the above parameters in their narrative, do NOT ask for it again.\n"
-    "- Formulate 4 to 5 empathetic, highly targeted follow-up questions to fill the missing gaps.\n"
+    "- Formulate AT MOST 4 (maximum 4) empathetic, highly targeted follow-up questions to fill the missing gaps.\n"
     "- Each question must be in canonical English ('question_text_en') and translated into the patient's language ('question_text') in native script.\n"
     "- Respond ONLY with a valid JSON object matching the requested schema."
 )
@@ -155,7 +155,7 @@ TASK:
    - diurnal_timing
    - triggers_relieving
    - medications_history
-4. Formulate exactly 4 to 5 targeted follow-up questions to fill these clinical gaps.
+4. Formulate AT MOST 4 (maximum 4) targeted follow-up questions to fill these clinical gaps.
 5. Translate each question into {lang_name} in its native script. Always provide 'question_text_en' in clear English.
 
 Return this exact JSON structure:
@@ -644,7 +644,8 @@ CLINICAL_REFERRAL_NOTE_SYSTEM = (
     "   • PRE-TRANSFER STABILIZATION MEASURES & MEDICATIONS ADMINISTERED\n"
     "   • RECOMMENDED LEVEL OF CARE & EN ROUTE MONITORING INSTRUCTIONS (Ambulance type, oxygen, paramedic escort)\n"
     "3. Maintain a formal, precise, and objective medical tone appropriate for tertiary hospital specialists.\n"
-    "4. Do NOT hallucinate unmentioned medical conditions, but formulate professional transfer protocols for the specified diagnosis."
+    "4. Do NOT hallucinate unmentioned medical conditions, but formulate professional transfer protocols for the specified diagnosis.\n"
+    "5. CRITICAL: DO NOT ADD ANY SIGNATURE LINES, SIGN-OFF BLOCKS, DOCTOR STAMPS, OR VERIFY/SEAL TAGS UNDER THE REPORT. End cleanly after the En Route Monitoring Instructions."
 )
 
 def build_clinical_referral_note_prompt(
@@ -660,9 +661,12 @@ def build_clinical_referral_note_prompt(
     referring_facility_name: str,
     urgency: str = "Urgent",
     clinical_notes: Optional[str] = None,
+    current_datetime: Optional[str] = None,
 ) -> str:
     """Builds prompt for generating the comprehensive AI referral note."""
+    dt_str = current_datetime or datetime.utcnow().strftime("%d %B %Y, %I:%M %p")
     return (
+        f"DATE & TIME OF REFERRAL: {dt_str}\n"
         f"PATIENT NAME: {patient_name} (ID: {patient_id})\n"
         f"AGE / GENDER: {age} years / {gender}\n"
         f"RECORDED BIOMARKERS & VITALS: {vitals_text}\n"
@@ -673,6 +677,9 @@ def build_clinical_referral_note_prompt(
         f"REASON FOR EXTERNAL REFERRAL: {reason_for_referral}\n"
         f"REFERRAL URGENCY: {urgency}\n"
         f"ATTENDING DOCTOR CLINICAL NOTES / BEDSIDE MEASURES: {clinical_notes or 'Standard pre-referral supportive care'}\n\n"
+        f"MANDATORY INSTRUCTIONS:\n"
+        f"- In 'Date/Time of Referral', write '{dt_str}'. NEVER write placeholder brackets like '[Insert Current Date and Time]'.\n"
+        f"- DO NOT add any signature lines, signature boxes, verify tags, or seals under the report. Stop after the en route monitoring section.\n\n"
         f"Draft the complete, official, structured Hospital Referral Transfer Memorandum:"
     )
 

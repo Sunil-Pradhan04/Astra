@@ -36,7 +36,6 @@ from app.services.local_tts_service import local_tts
 from app.services.memory_store import session_memory
 from app.services.rag_triage_service import rag_triage
 from app.services.ocr_service import ocr_service
-from app.services.conversation_rag_service import conversation_rag
 from app.core.prompts import ANSWER_ADEQUACY_SYSTEM, build_answer_adequacy_prompt
 from app.urgency import urgency_detector
 
@@ -99,6 +98,14 @@ class StartSessionRequest(BaseModel):
     patient_id: str
     language: str = "hindi"          # hindi | english | odia
     tts_engine: str = "local"        # local | sarvam
+    consent_given: bool = True
+    consent_timestamp: Optional[str] = None
+    consent_details: Optional[Dict[str, Any]] = None
+
+
+class ConsentAudioRequest(BaseModel):
+    language: str = "hindi"
+    tts_engine: str = "local"
 
 
 class SessionTextReplyRequest(BaseModel):
@@ -145,6 +152,25 @@ def _get_localized_rx_prompt(lang_code: str) -> str:
 def _get_localized_cam_guidance(lang_code: str) -> str:
     lang_prefix = (lang_code or "en")[:2].lower()
     return CAM_GUIDANCE_TEXTS.get(lang_prefix, CAM_GUIDANCE_TEXTS["en"])
+
+
+CONSENT_AUDIO_TEXTS = {
+    "hi": "नमस्ते। एआई परामर्श शुरू करने से पहले, कृपया पुष्टि करें कि आप अपनी आवाज़ रिकॉर्ड करने, अपने लक्षणों का विश्लेषण करने और डॉक्टरों के साथ अपनी स्वास्थ्य जानकारी साझा करने की अनुमति देते हैं।",
+    "od": "ନମସ୍କାର। ଏଆଇ ପରାମର୍ଶ ଆରମ୍ଭ କରିବା ପୂର୍ବରୁ, ଦୟାକରି ନିଶ୍ଚିତ କରନ୍ତୁ ଯେ ଆପଣ ଆପଣଙ୍କ ସ୍ୱର ରେକର୍ଡିଂ ଏବଂ ଡାକ୍ତରଙ୍କ ସହିତ ସ୍ୱାସ୍ଥ୍ୟ ତଥ୍ୟ ଅଂଶୀଦାର କରିବାକୁ ଅନୁମତି ଦେଉଛନ୍ତି।",
+    "en": "Welcome to Astra Healthcare. Before beginning your AI consultation, please confirm that you authorize Astra AI to record your voice, analyze your symptoms, and share your clinical consultation records with attending doctors and healthcare staff.",
+    "ta": "வணக்கம். AI ஆலோசனையைத் தொடங்குவதற்கு முன், உங்கள் குரலைப் பதிவு செய்யவும் மருத்துவர்களுடன் சுகாதாரத் தகவல்களைப் பகிரவும் நீங்கள் ஒப்புதல் அளிக்கிறீர்கள் என்பதை உறுதிப்படுத்தவும்.",
+    "te": "నమస్కారం. AI సంప్రదింపులను ప్రారంభించే ముందు, మీ వాయిస్‌ని రికార్డ్ చేయడానికి మరియు వైద్యులతో ఆరోగ్య సమాచారాన్ని పంచుకోవడానికి మీరు అనుమతిస్తున్నారని దయచేసి ధృవీకరించండి.",
+    "bn": "নমস্কার। এআই পরামর্শ শুরু করার আগে, অনুগ্রহ করে নিশ্চিত করুন যে আপনি আপনার ভয়েস রেকর্ড করতে এবং ডাক্তারদের সাথে স্বাস্থ্য তথ্য ভাগ করতে সম্মতি দিচ্ছেন।",
+    "mr": "नमस्कार. AI सल्लामसलत सुरू करण्यापूर्वी, कृपया पुष्टी करा की आपण आपला आवाज रेकॉर्ड करण्यास आणि डॉक्टरांशी आरोग्य माहिती सामायिक करण्यास परवानगी देत आहात.",
+    "gu": "નમસ્તે. AI પરામર્શ શરૂ કરતા પહેલા, કૃપા કરીને પુષ્ટિ કરો કે તમે તમારો અવાજ રેકોર્ડ કરવા અને ડોકટરો સાથે આરોગ્ય માહિતી શેર કરવાની મંજૂરી આપો છો.",
+    "kn": "ನಮಸ್ಕಾರ. AI ಸಮಾಲೋಚನೆಯನ್ನು ಪ್ರಾರಂಭಿಸುವ ಮೊದಲು, ನಿಮ್ಮ ಧ್ವನಿಯನ್ನು ರೆಕಾರ್ಡ್ ಮಾಡಲು ಮತ್ತು ವೈದ್ಯರೊಂದಿಗೆ ಆರೋಗ್ಯ ಮಾಹಿತಿಯನ್ನು ಹಂಚಿಕೊಳ್ಳಲು ನೀವು ಅನುಮತಿಸುತ್ತೀರಿ ಎಂದು ಖಚಿತಪಡಿಸಿ.",
+    "ml": "നമസ്കാരം. AI കൺസൾട്ടേഷൻ ആരംഭിക്കുന്നതിന് മുമ്പ്, നിങ്ങളുടെ ശബ്ദം റെക്കോർഡ് ചെയ്യാനും ഡോക്ടർമാരുമായി വിവരങ്ങൾ പങ്കിടാനും സമ്മതിക്കുന്നുവെന്ന് സ്ഥിரീകരിക്കുക.",
+    "pa": "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ। AI ਸਲਾਹ-ਮਸ਼ਵਰਾ ਸ਼ੁਰੂ ਕਰਨ ਤੋਂ ਪਹਿਲਾਂ, ਕਿਰਪਾ ਕਰਕੇ ਪੁਸ਼ਟੀ ਕਰੋ ਕਿ ਤੁਸੀਂ ਆਪਣੀ ਆਵਾਜ਼ ਰਿਕਾਰਡ ਕਰਨ ਅਤੇ ਡਾਕਟਰਾਂ ਨਾਲ ਜਾਣਕਾਰੀ ਸਾਂਝੀ ਕਰਨ ਦੀ ਇਜਾਜ਼ਤ ਦਿੰਦੇ ਹੋ।",
+}
+
+def _get_localized_consent_prompt(lang_code: str) -> str:
+    lang_prefix = (lang_code or "en")[:2].lower()
+    return CONSENT_AUDIO_TEXTS.get(lang_prefix, CONSENT_AUDIO_TEXTS["en"])
 
 
 def _patient_mentions_prescription_or_report(answer_clean: str, answer_en: str) -> bool:
@@ -328,6 +354,34 @@ async def get_patient_details(
     }
 
 
+@router.post("/consent-audio")
+async def get_consent_audio(
+    data: ConsentAudioRequest,
+    device: EndpointDevice = Depends(get_current_device),
+):
+    """
+    Synthesizes and returns multilingual speech for the patient informed consent prompt.
+    """
+    lang_meta = get_lang_meta(data.language)
+    lang_code = lang_meta["code"]
+    speaker = lang_meta["speaker"]
+    consent_text = _get_localized_consent_prompt(lang_code)
+
+    audio_base64, engine_used = await synthesize_speech(
+        text=consent_text,
+        lang_code=lang_code,
+        speaker=speaker,
+        engine=data.tts_engine or "local",
+    )
+    return {
+        "language": data.language,
+        "language_code": lang_code,
+        "consent_text": consent_text,
+        "audio_base64": audio_base64,
+        "engine_used": engine_used,
+    }
+
+
 @router.post("/session/start")
 async def start_kiosk_session(
     data: StartSessionRequest,
@@ -346,6 +400,15 @@ async def start_kiosk_session(
         raise HTTPException(404, f"Patient {pid} not found in this facility")
 
     patient.status = "in_ai_session"
+    if data.consent_given:
+        patient.consent_given = True
+        patient.consent_timestamp = datetime.utcnow()
+        patient.consent_details = data.consent_details or {
+            "voice_recording_consent": True,
+            "clinical_data_sharing_consent": True,
+            "doctor_access_consent": True,
+            "consent_language": data.language,
+        }
     await patient.save()
 
     lang_meta = get_lang_meta(data.language)
@@ -370,6 +433,9 @@ async def start_kiosk_session(
         "patient_id": pid,
         "device_id": device.device_id,
         "care_hub_id": device.care_hub_id,
+        "consent_given": patient.consent_given,
+        "consent_timestamp": patient.consent_timestamp.isoformat() if patient.consent_timestamp else None,
+        "consent_details": patient.consent_details,
         "language": lang_code,
         "language_name": lang_name,
         "speaker": speaker,
@@ -413,6 +479,8 @@ async def start_kiosk_session(
         "question_intent": "Open symptom disclosure",
         "audio_base64": q1_audio,
         "questions_status": _build_questions_status(memory["questions"]),
+        "consent_verified": patient.consent_given,
+        "consent_timestamp": memory.get("consent_timestamp"),
     }
 
 
@@ -825,7 +893,7 @@ async def _process_reply(
                 lang_name=lang_name,
                 lang_code=lang_code,
             )
-            gap_questions = gap_analysis.get("gap_questions", [])
+            gap_questions = gap_analysis.get("gap_questions", [])[:4]
             symptoms_identified = gap_analysis.get("symptoms_identified", [])
             symptoms_summary = ", ".join(symptoms_identified) if symptoms_identified else "Reported Symptoms"
             memory["symptoms_summary"] = symptoms_summary
@@ -1379,27 +1447,6 @@ async def _finalize_session_summary(
         memory["prescription_data"] = prescription_data
     await session_memory.save_session(session_id, memory)
 
-    # ── Index real conversation turns into Pinecone index 'astra-conversation' ──
-    try:
-        dialogue_turns = ai_summary.get("dialogue_turns") or []
-        if not dialogue_turns and "questions" in memory:
-            dialogue_turns = [
-                {
-                    "turn_number": q.get("id"),
-                    "question": q.get("question_text_en") or q.get("question_text"),
-                    "answer": q.get("patient_answer_en") or q.get("patient_answer"),
-                    "timestamp": q.get("timestamp"),
-                    "phase": q.get("phase", "interrogation"),
-                    "intent": q.get("clinical_intent", ""),
-                }
-                for q in memory.get("questions", [])
-                if q.get("patient_answer_en") or q.get("patient_answer")
-            ]
-        if dialogue_turns:
-            await conversation_rag.index_patient_conversation(patient_id, dialogue_turns, session_id=session_id)
-    except Exception as e:
-        print(f"[Kiosk] Error indexing conversation into Pinecone: {e}")
-
     return {
         "session_id": session_id,
         "patient_id": patient_id,
@@ -1426,42 +1473,55 @@ async def _finalize_session_summary(
 
 # ── Prescription Document OCR & Processing Endpoints ───────────────────────
 
-@router.post("/session/upload-prescription")
-async def upload_prescription_photo(
-    session_id: str = Form(...),
-    patient_id: str = Form(...),
-    file: UploadFile = File(...),
-    device: EndpointDevice = Depends(get_current_device),
-):
+async def process_prescription_upload_core(
+    session_id: str,
+    patient_id: str,
+    image_bytes: bytes,
+    filename: str,
+    care_hub_id: str,
+    device_id: Optional[str] = None,
+    device: Optional[EndpointDevice] = None,
+) -> Dict[str, Any]:
     """
-    Receives captured prescription or medical report image from frontend.
-    Executes the multi-stage OCR pipeline:
-    1. Quality assessment (OpenCV/Pillow). If low quality, immediately asks patient to recapture.
-    2. Printed vs Handwritten classification (PyTorch MobileNetV3).
-    3. If handwritten -> skips OCR, attaches directly for qualified human inspection.
-    4. If printed -> PaddleOCR text extraction + deterministic checks.
-    5. Sarvam AI LLM structured extraction (zero hallucination).
-    6. Persists in MongoDB and merges into patient's triage summary.
+    Reusable core handler for prescription upload & OCR processing.
+    Executes OpenCV quality checks, classification, PaddleOCR + Sarvam extraction,
+    MongoDB record creation, memory advancement, and summary finalization.
     """
     memory = await session_memory.get_session(session_id)
     if not memory:
-        raise HTTPException(404, "Session memory not found or expired.")
+        # If memory not active/expired, still run OCR pipeline & store doc
+        return await ocr_service.process_prescription_document(
+            image_bytes=image_bytes,
+            filename=filename or "prescription.jpg",
+            patient_id=patient_id,
+            care_hub_id=care_hub_id,
+            device_id=device_id,
+            session_id=session_id,
+        )
 
     lang_code = memory.get("language", "en-IN")
     lang_name = memory.get("language_name", "English")
     speaker = memory.get("speaker", "priya")
     engine_choice = memory.get("tts_engine", "local")
 
-    image_bytes = await file.read()
-    if not image_bytes:
-        raise HTTPException(400, "Empty image file received.")
+    if device is None and care_hub_id:
+        try:
+            device = await EndpointDevice.find_one(EndpointDevice.care_hub_id == care_hub_id)
+        except Exception:
+            pass
+    if device is None:
+        device = EndpointDevice(
+            device_id=device_id or "DEV-KIOSK-01",
+            care_hub_id=care_hub_id or "default_hub",
+            location="Kiosk Terminal",
+        )
 
     result = await ocr_service.process_prescription_document(
         image_bytes=image_bytes,
-        filename=file.filename or "prescription.jpg",
+        filename=filename or "prescription.jpg",
         patient_id=patient_id,
-        care_hub_id=device.care_hub_id,
-        device_id=device.device_id,
+        care_hub_id=care_hub_id,
+        device_id=device_id or device.device_id,
         session_id=session_id,
     )
 
@@ -1611,7 +1671,7 @@ async def upload_prescription_photo(
                     lang_name=lang_name,
                     lang_code=lang_code,
                 )
-                gap_questions = gap_analysis.get("gap_questions", [])
+                gap_questions = gap_analysis.get("gap_questions", [])[:4]
                 symptoms_identified = gap_analysis.get("symptoms_identified", [])
                 memory["symptoms_summary"] = ", ".join(symptoms_identified) if symptoms_identified else "Reported Symptoms"
                 memory["temporary_clinical_memory"] = {
@@ -1714,6 +1774,32 @@ async def upload_prescription_photo(
     summary_resp["open_camera"] = False
     summary_resp["prescription_data"] = result
     return summary_resp
+
+
+@router.post("/session/upload-prescription")
+async def upload_prescription_photo(
+    session_id: str = Form(...),
+    patient_id: str = Form(...),
+    file: UploadFile = File(...),
+    device: EndpointDevice = Depends(get_current_device),
+):
+    """
+    Receives captured prescription or medical report image from frontend.
+    Executes the multi-stage OCR pipeline and updates session.
+    """
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(400, "Empty image file received.")
+
+    return await process_prescription_upload_core(
+        session_id=session_id,
+        patient_id=patient_id,
+        image_bytes=image_bytes,
+        filename=file.filename or "prescription.jpg",
+        care_hub_id=device.care_hub_id,
+        device_id=device.device_id,
+        device=device,
+    )
 
 
 @router.post("/session/skip-prescription")

@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from app.core.database import init_db
 from app.core.config import settings
-from app.routers import auth, care_hub, doctors, health_workers, endpoint_devices, communicate, settings as settings_router, patients, kiosk, urgency
+from app.routers import auth, care_hub, doctors, health_workers, endpoint_devices, communicate, settings as settings_router, patients, kiosk, qr_upload, urgency, system_test
 
 
 import asyncio
@@ -18,7 +18,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    # Initialize local urgency signal detector (loads model + precomputes reference vectors once)
+    # 1. Initialize local urgency signal detector (loads model + precomputes reference vectors once)
     try:
         from app.urgency.detector import urgency_detector
         urgency_detector.initialize()
@@ -26,13 +26,21 @@ async def lifespan(app: FastAPI):
         import logging
         logging.getLogger("astra").error(f"Failed to initialize urgency detector during startup: {e}")
 
-    # Bootstrap Pinecone 'astra-conversation' index for existing patients in background
+    # 2. Preload & Warm up OCR models (MobileNetV3 + PaddleOCR detection/recognition)
     try:
-        from app.services.conversation_rag_service import conversation_rag
-        asyncio.create_task(conversation_rag.bootstrap_existing_patients())
+        from app.services.ocr_service import ocr_service
+        await asyncio.to_thread(ocr_service.preload_models)
     except Exception as e:
         import logging
-        logging.getLogger("astra").warning(f"Could not trigger conversation RAG bootstrap: {e}")
+        logging.getLogger("astra").error(f"Failed to preload OCR models during startup: {e}")
+
+    # 3. Preload Local Kokoro TTS models (English + Hindi)
+    try:
+        from app.services.local_tts_service import local_tts
+        await asyncio.to_thread(local_tts.preload_models)
+    except Exception as e:
+        import logging
+        logging.getLogger("astra").error(f"Failed to preload TTS models during startup: {e}")
     try:
         yield
     except (asyncio.CancelledError, KeyboardInterrupt):
@@ -46,10 +54,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow frontend
+# CORS — allow local hostnames, configured URLs, and any LAN IP subnet (Wi-Fi access)
+cors_origins = [settings.FRONTEND_URL, "http://localhost:5174", "http://localhost:5173"]
+if settings.FRONTEND_LAN_URL and settings.FRONTEND_LAN_URL.strip():
+    cors_origins.append(settings.FRONTEND_LAN_URL.strip())
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_URL, "http://localhost:5174", "http://localhost:5173"],
+    allow_origins=cors_origins,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -73,8 +86,10 @@ app.include_router(communicate.router,       prefix="/api")
 app.include_router(settings_router.router,   prefix="/api")
 app.include_router(patients.router,          prefix="/api")
 app.include_router(kiosk.router,             prefix="/api")
+app.include_router(qr_upload.router,         prefix="/api")  # QR-based photo import
 app.include_router(urgency.router,           prefix="/api")
 app.include_router(urgency.router)  # Direct /triage/urgency support
+app.include_router(system_test.router,       prefix="/api")
 
 
 @app.get("/")

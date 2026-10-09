@@ -20,6 +20,9 @@ export const getQueuedPatientIds = () =>
 export const getPatientDetails = (patientId) =>
   axios.get(`/kiosk/patient/${patientId}`)
 
+export const getConsentAudio = (data) =>
+  axios.post('/kiosk/consent-audio', data)
+
 export const startKioskSession = (data) =>
   axios.post('/kiosk/session/start', data)
 
@@ -46,4 +49,20 @@ export const skipPrescription = (formData) =>
 
 export const updatePatientVitals = (patientId, data) =>
   axios.patch(`/patients/${patientId}/manual-update`, data)
+
+// ── QR-Based Mobile Photo Import ──────────────────────────────────────────
+export const createQRSession = (data) =>
+  axios.post('/kiosk/qr-upload/create', data)
+
+export const getQRSessionStatus = (token) =>
+  axios.get(`/kiosk/qr-upload/status/${token}`)
+
+export const getQRMobileSession = (token) =>
+  axios.get(`/kiosk/qr-upload/session/${token}`)
+
+export const submitQRMobileUpload = (token, formData) =>
+  axios.post(`/kiosk/qr-upload/submit/${token}`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+
 

@@ -18,7 +18,6 @@ from app.schemas.patient import (
     ExternalReferralDispatchWorkerRequest,
 )
 from app.services.health_worker_ai_service import health_worker_ai
-from app.services.conversation_rag_service import conversation_rag
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/patients", tags=["Patients & Queue"])
@@ -391,29 +390,6 @@ async def get_patient_detail(patient_id: str):
     return patient
 
 
-class WorkerInterrogationChatRequest(BaseModel):
-    query: str
-    user_name: Optional[str] = None
-
-
-@router.post("/{patient_id}/chat-interrogation")
-async def worker_chat_patient_interrogation(
-    patient_id: str,
-    data: WorkerInterrogationChatRequest,
-):
-    """
-    RAG Chatbot for Verification Desk health workers and clinicians.
-    Answers inquiries regarding patient's actual interrogation dialogue turns
-    retrieved from Pinecone vector index 'astra-conversation' (1536 dim, cosine similarity).
-    """
-    res = await conversation_rag.answer_doctor_query(
-        patient_id=patient_id,
-        query=data.query,
-        doctor_name=data.user_name or "Verification Health Worker",
-    )
-    return res
-
-
 @router.post("/{patient_id}/dispatch-external-referral")
 async def dispatch_external_referral(
     patient_id: str,
@@ -426,15 +402,24 @@ async def dispatch_external_referral(
     """
     patient = await Patient.find_one(Patient.patient_id == patient_id)
     if not patient:
-        raise HTTPException(404, f"Patient {patient_id} not found")
+        try:
+            patient = await Patient.get(patient_id)
+        except Exception:
+            patient = None
+    if not patient:
+        raise HTTPException(404, f"Patient {patient_id} not found in database")
+
+    dist_val = data.target_care_hub_distance_km if data.target_care_hub_distance_km is not None else data.distance_km
 
     ext_ref = patient.external_referral or {}
     ext_ref["target_care_hub_id"] = data.target_care_hub_id
     ext_ref["target_care_hub_name"] = data.target_care_hub_name
     ext_ref["target_care_hub_type"] = data.target_care_hub_type
-    ext_ref["target_care_hub_distance_km"] = data.target_care_hub_distance_km
+    ext_ref["target_care_hub_distance_km"] = dist_val
     ext_ref["final_referral_note"] = data.updated_referral_note
     ext_ref["updated_referral_note"] = data.updated_referral_note
+    ext_ref["transport_type"] = data.transport_type
+    ext_ref["dispatch_notes"] = data.dispatch_notes
     ext_ref["dispatched_by_worker_id"] = data.worker_id or "HW-VERIFIER"
     ext_ref["dispatched_by_worker_name"] = data.worker_name or "Mid-Level Health Worker"
     ext_ref["dispatched_at"] = datetime.utcnow().isoformat()
@@ -445,11 +430,13 @@ async def dispatch_external_referral(
 
     note_entry = (
         f"[External Referral Dispatched]: Target -> {data.target_care_hub_name} "
-        f"({data.target_care_hub_type or 'Hospital'}, {data.target_care_hub_distance_km or '—'} km). "
+        f"({data.target_care_hub_type or 'Hospital'}, {dist_val or '—'} km). "
+        f"Transport: {data.transport_type or 'Standard Ambulance'}. "
         f"Dispatched by {data.worker_name or 'Health Worker'}."
     )
-    if patient.clinical_notes:
-        patient.clinical_notes = f"{patient.clinical_notes}\n{note_entry}"
+    existing_notes = getattr(patient, "clinical_notes", None) or ""
+    if existing_notes:
+        patient.clinical_notes = f"{existing_notes}\n{note_entry}"
     else:
         patient.clinical_notes = note_entry
 

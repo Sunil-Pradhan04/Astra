@@ -30,6 +30,7 @@ import {
   Navigation,
   Printer,
   Share2,
+  Ambulance,
 } from 'lucide-react'
 import {
   getGroupedPatientQueues,
@@ -38,10 +39,19 @@ import {
   verifyPatientToDoctor,
   requestPatientRescreen,
   getDoctorsQueues,
-  askWorkerInterrogationChatbot,
   getNearbyFacilities,
   dispatchExternalReferral,
 } from '../../api/workerApi'
+import PrintedReferralForm from '../../components/referral/PrintedReferralForm'
+import FacilitiesMapRadar from '../../components/referral/FacilitiesMapRadar'
+
+const extractErrorMessage = (err, fallback) => {
+  const d = err?.response?.data?.detail
+  if (typeof d === 'string') return d
+  if (Array.isArray(d)) return d.map((x) => x.msg || JSON.stringify(x)).join(', ')
+  if (d && typeof d === 'object') return d.message || JSON.stringify(d)
+  return err?.message || fallback
+}
 
 // Helper to consolidate all attached report images across possible fields
 const getAttachedDocuments = (patient) => {
@@ -350,7 +360,7 @@ export default function VerificationPage() {
   // View Mode: 'review' | 'edit' | 'external_referral'
   const [viewMode, setViewMode] = useState('review')
   const [isAiDrawerOpen, setIsAiDrawerOpen] = useState(false)
-  const [drawerActiveTab, setDrawerActiveTab] = useState('rag') // 'rag' | 'chat' | 'interrogation'
+  const [drawerActiveTab, setDrawerActiveTab] = useState('chat') // 'chat' | 'interrogation'
   const [editFormData, setEditFormData] = useState({
     bp_systolic: '',
     bp_diastolic: '',
@@ -362,17 +372,36 @@ export default function VerificationPage() {
     urgency_level: 'green',
   })
 
+  // ── Worker Session Info ──
+  const [workerInfo] = useState(() => {
+    try {
+      const stored = localStorage.getItem('worker_info') || localStorage.getItem('astra_worker') || localStorage.getItem('user')
+      return stored ? JSON.parse(stored) : {}
+    } catch {
+      return {}
+    }
+  })
+
   // ── External Referral Radar & Dispatch State ──
   const [editableReferralNote, setEditableReferralNote] = useState('')
   const [radiusKm, setRadiusKm] = useState(20)
   const [facilityType, setFacilityType] = useState('all')
   const [facilitySearch, setFacilitySearch] = useState('')
   const [nearbyFacilities, setNearbyFacilities] = useState([])
+  const [originLocation, setOriginLocation] = useState({
+    latitude: 20.2961,
+    longitude: 85.8245,
+    name: 'Referring Care Hub',
+  })
   const [loadingFacilities, setLoadingFacilities] = useState(false)
   const [selectedFacilityId, setSelectedFacilityId] = useState('')
+  const [transportType, setTransportType] = useState('Advanced Life Support (ALS) Ambulance')
+  const [dispatchNotes, setDispatchNotes] = useState('')
   const [dispatchingReferral, setDispatchingReferral] = useState(false)
   const [dispatchedSlipModal, setDispatchedSlipModal] = useState(false)
   const [lastDispatchedSlipData, setLastDispatchedSlipData] = useState(null)
+
+  const pickedFacility = nearbyFacilities.find((f) => f.id === selectedFacilityId) || null
 
   const loadNearbyFacilities = async (targetRadius = radiusKm, targetType = facilityType, searchQ = facilitySearch) => {
     setLoadingFacilities(true)
@@ -385,7 +414,16 @@ export default function VerificationPage() {
       const res = await getNearbyFacilities(params)
       const facs = res.data?.facilities || []
       setNearbyFacilities(facs)
-      if (facs.length > 0) {
+
+      if (res.data?.origin) {
+        setOriginLocation({
+          latitude: res.data.origin.latitude,
+          longitude: res.data.origin.longitude,
+          name: selectedCase?.external_referral?.referring_care_hub_name || 'Referring Hospital',
+        })
+      }
+
+      if (facs.length > 0 && !selectedFacilityId) {
         setSelectedFacilityId(facs[0].id)
       }
     } catch (err) {
@@ -400,8 +438,8 @@ export default function VerificationPage() {
       alert('Please select a destination healthcare facility from the radar list.')
       return
     }
-    const pickedFacility = nearbyFacilities.find((f) => f.id === selectedFacilityId)
-    if (!pickedFacility) {
+    const targetFacility = pickedFacility || nearbyFacilities.find((f) => f.id === selectedFacilityId)
+    if (!targetFacility) {
       alert('Selected facility not found.')
       return
     }
@@ -412,39 +450,38 @@ export default function VerificationPage() {
     setDispatchingReferral(true)
     try {
       const payload = {
-        target_care_hub_id: pickedFacility.id,
-        target_care_hub_name: pickedFacility.name,
-        target_care_hub_type: pickedFacility.hub_type,
-        target_care_hub_distance_km: pickedFacility.distance_km,
+        target_care_hub_id: targetFacility.id,
+        target_care_hub_name: targetFacility.name,
+        target_care_hub_type: targetFacility.hub_type,
+        target_care_hub_distance_km: targetFacility.distance_km,
+        distance_km: targetFacility.distance_km,
+        transport_type: transportType || 'Advanced Life Support (ALS) Ambulance',
+        dispatch_notes: dispatchNotes?.trim() || undefined,
         updated_referral_note: editableReferralNote.trim(),
+        worker_id: workerInfo?.worker_id,
+        worker_name: workerInfo?.full_name || 'Mid-Level Health Worker',
       }
       const res = await dispatchExternalReferral(selectedCase.patient_id, payload)
       const updatedPatient = res.data?.patient || selectedCase
 
       setLastDispatchedSlipData({
         patient: updatedPatient,
-        facility: pickedFacility,
+        facility: targetFacility,
         note: editableReferralNote.trim(),
         dispatchedAt: new Date().toISOString(),
       })
       setDispatchedSlipModal(true)
       showNotification(
-        `External referral for ${selectedCase.full_name} (${selectedCase.patient_id}) successfully dispatched to ${pickedFacility.name}!`,
+        `External referral for ${selectedCase.full_name} (${selectedCase.patient_id}) successfully dispatched to ${targetFacility.name}!`,
         'success'
       )
       loadQueues()
     } catch (err) {
-      alert(err.response?.data?.detail || 'Failed to dispatch external referral.')
+      alert(extractErrorMessage(err, 'Failed to dispatch external referral.'))
     } finally {
       setDispatchingReferral(false)
     }
   }
-
-  // RAG Interrogation Q&A State (astra-conversation)
-  const [ragMessage, setRagMessage] = useState('')
-  const [isRagProcessing, setIsRagProcessing] = useState(false)
-  const [ragHistory, setRagHistory] = useState([])
-  const ragChatScrollRef = useRef(null)
 
   // AI Co-Pilot State (Natural language edits)
   const [aiMessage, setAiMessage] = useState('')
@@ -652,49 +689,6 @@ export default function VerificationPage() {
       setTimeout(() => {
         if (aiChatScrollRef.current) {
           aiChatScrollRef.current.scrollTop = aiChatScrollRef.current.scrollHeight
-        }
-      }, 100)
-    }
-  }
-
-  // ── Handler: RAG Interrogation Q&A Chatbot (astra-conversation) ──
-  const handleSendRagQuery = async (customMessage) => {
-    const textToSend = (customMessage || ragMessage).trim()
-    if (!textToSend || !selectedCase || isRagProcessing) return
-
-    setIsRagProcessing(true)
-    setRagMessage('')
-
-    try {
-      const res = await askWorkerInterrogationChatbot(selectedCase.patient_id, textToSend)
-      const data = res.data || {}
-      setRagHistory((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(),
-          timestamp: new Date().toISOString(),
-          message: textToSend,
-          ai_reply: data.reply || 'Clinical interrogation response generated.',
-          citations: data.citations || [],
-        },
-      ])
-    } catch (err) {
-      console.warn('Worker AI RAG query error:', err)
-      setRagHistory((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(),
-          timestamp: new Date().toISOString(),
-          message: textToSend,
-          ai_reply: `No response from conversation vector service. Fallback triage summary for ${selectedCase.full_name}: "${selectedCase.chief_complaints}".`,
-          citations: [],
-        },
-      ])
-    } finally {
-      setIsRagProcessing(false)
-      setTimeout(() => {
-        if (ragChatScrollRef.current) {
-          ragChatScrollRef.current.scrollTop = ragChatScrollRef.current.scrollHeight
         }
       }, 100)
     }
@@ -1320,7 +1314,7 @@ export default function VerificationPage() {
                       </div>
                     </div>
 
-                    {/* 2. Editable Referral Note (Health Worker Update) */}
+                    {/* 2. Official Clinical Referral Memorandum - Printed Form UI */}
                     <div
                       style={{
                         background: '#ffffff',
@@ -1330,272 +1324,123 @@ export default function VerificationPage() {
                         marginBottom: 20,
                       }}
                     >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <Edit3 size={16} color="#4338ca" />
+                          <FileText size={17} color="#4338ca" />
                           <h4 style={{ margin: 0, fontSize: 14.5, fontWeight: 800, color: '#0f172a' }}>
-                            Official Clinical Referral Memorandum (Health Worker Editable)
+                            Official Clinical Referral Memorandum Slip (Printed Form UI)
                           </h4>
                         </div>
                         <span style={{ fontSize: 11.5, color: '#64748b' }}>
-                          Update note with transport protocol, ambulance escort, or oxygen requirements
+                          Switch to "Edit Raw Text" to customize notes or print official transfer paperwork
                         </span>
                       </div>
 
-                      <textarea
-                        rows={8}
-                        value={editableReferralNote}
-                        onChange={(e) => setEditableReferralNote(e.target.value)}
-                        placeholder="Official referral memorandum..."
-                        style={{
-                          width: '100%',
-                          padding: '12px 14px',
-                          borderRadius: 8,
-                          border: '1.5px solid #cbd5e1',
-                          fontSize: 12.5,
-                          lineHeight: 1.6,
-                          fontFamily: 'monospace',
-                          background: '#f8fafc',
-                          color: '#0f172a',
+                      <PrintedReferralForm
+                        patient={selectedCase || {}}
+                        referralData={{
+                          ...(selectedCase?.external_referral || {}),
+                          target_care_hub_name: pickedFacility?.name,
+                          target_care_hub_type: pickedFacility?.hub_type,
+                          distance_km: pickedFacility?.distance_km,
+                          transport_type: transportType || 'Advanced Life Support (ALS) Ambulance',
+                          dispatched_by_worker_name: workerInfo?.full_name || 'Mid-Level Health Worker',
                         }}
+                        rawNote={editableReferralNote}
+                        onNoteChange={setEditableReferralNote}
+                        editable={true}
+                        showPrintButton={true}
                       />
                     </div>
 
-                    {/* 3. Facilities Radius Radar & 8 Types Filter */}
+                    {/* 3. Facilities Radius Radar & Live Interactive Map */}
+                    <FacilitiesMapRadar
+                      origin={originLocation}
+                      facilities={nearbyFacilities}
+                      selectedFacilityId={selectedFacilityId}
+                      onSelectFacility={setSelectedFacilityId}
+                      radiusKm={radiusKm}
+                      facilityType={facilityType}
+                      onRadiusChange={(r) => {
+                        setRadiusKm(r)
+                        loadNearbyFacilities(r, facilityType, facilitySearch)
+                      }}
+                      onTypeChange={(t) => {
+                        setFacilityType(t)
+                        loadNearbyFacilities(radiusKm, t, facilitySearch)
+                      }}
+                      searchQuery={facilitySearch}
+                      onSearchChange={(q) => {
+                        setFacilitySearch(q)
+                        loadNearbyFacilities(radiusKm, facilityType, q)
+                      }}
+                    />
+
+                    {/* 3.5 Transport Arrangement & Emergency Dispatch Coordination */}
                     <div
                       style={{
                         background: '#ffffff',
                         border: '1.5px solid #cbd5e1',
                         borderRadius: 12,
                         padding: '18px 20px',
-                        marginBottom: 24,
+                        marginBottom: 20,
                       }}
                     >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <Compass size={17} color="#4338ca" />
-                          <h4 style={{ margin: 0, fontSize: 15, fontWeight: 800, color: '#0f172a' }}>
-                            Available Healthcare Facilities Radar ({nearbyFacilities.length} Found)
-                          </h4>
-                        </div>
-                        <span style={{ fontSize: 11.5, color: '#64748b', fontWeight: 600 }}>
-                          Live Haversine Distance & Google Maps Direction API
-                        </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+                        <Ambulance size={17} color="#4338ca" />
+                        <h4 style={{ margin: 0, fontSize: 15, fontWeight: 800, color: '#0f172a' }}>
+                          Emergency Transport & Dispatch Coordination
+                        </h4>
                       </div>
 
-                      {/* Filter Controls Bar */}
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', marginBottom: 16, background: '#f8fafc', padding: '12px 14px', borderRadius: 10, border: '1px solid #e2e8f0' }}>
-                        {/* Radius Range Chips */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span style={{ fontSize: 11.5, fontWeight: 800, color: '#475569', textTransform: 'uppercase' }}>
-                            Radius:
-                          </span>
-                          {[
-                            { label: '10 km', val: 10 },
-                            { label: '20 km', val: 20 },
-                            { label: '50 km', val: 50 },
-                            { label: '100 km', val: 100 },
-                            { label: 'All Distances', val: null },
-                          ].map((r) => {
-                            const isActive = radiusKm === r.val
-                            return (
-                              <button
-                                key={r.label}
-                                type="button"
-                                onClick={() => {
-                                  setRadiusKm(r.val)
-                                  loadNearbyFacilities(r.val, facilityType, facilitySearch)
-                                }}
-                                style={{
-                                  padding: '5px 11px',
-                                  borderRadius: 6,
-                                  fontSize: 12,
-                                  fontWeight: 700,
-                                  cursor: 'pointer',
-                                  border: isActive ? '1.5px solid #4338ca' : '1px solid #cbd5e1',
-                                  background: isActive ? '#4338ca' : '#ffffff',
-                                  color: isActive ? '#ffffff' : '#334155',
-                                  transition: 'all 0.15s ease',
-                                }}
-                              >
-                                {r.label}
-                              </button>
-                            )
-                          })}
-                        </div>
-
-                        {/* Facility Type Selector (All 8 Types) */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span style={{ fontSize: 11.5, fontWeight: 800, color: '#475569', textTransform: 'uppercase' }}>
-                            Facility Type:
-                          </span>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.2fr', gap: 16 }}>
+                        <div>
+                          <label style={{ display: 'block', fontSize: 11.5, fontWeight: 800, color: '#475569', textTransform: 'uppercase', marginBottom: 6 }}>
+                            Assigned Transport Mode:
+                          </label>
                           <select
-                            value={facilityType}
-                            onChange={(e) => {
-                              const val = e.target.value
-                              setFacilityType(val)
-                              loadNearbyFacilities(radiusKm, val, facilitySearch)
-                            }}
+                            value={transportType}
+                            onChange={(e) => setTransportType(e.target.value)}
                             style={{
-                              padding: '6px 12px',
-                              borderRadius: 6,
-                              fontSize: 12,
-                              fontWeight: 600,
+                              width: '100%',
+                              padding: '10px 12px',
+                              borderRadius: 8,
                               border: '1.5px solid #cbd5e1',
-                              background: '#ffffff',
+                              fontSize: 13,
+                              fontWeight: 600,
+                              background: '#f8fafc',
                               color: '#0f172a',
                             }}
                           >
-                            <option value="all">All 8 Facility Types</option>
-                            <option value="Government Hospital">Government Hospital</option>
-                            <option value="Primary Health Center (PHC)">Primary Health Center (PHC)</option>
-                            <option value="Community Health Center (CHC)">Community Health Center (CHC)</option>
-                            <option value="District / Tertiary Hospital">District / Tertiary Hospital</option>
-                            <option value="Public Health Camp">Public Health Camp</option>
-                            <option value="Company Clinic">Company Clinic</option>
-                            <option value="Industrial Health Unit">Industrial Health Unit</option>
-                            <option value="Campus Health Center">Campus Health Center</option>
+                            <option value="Advanced Life Support (ALS) Ambulance">🚑 Advanced Life Support (ALS) Ambulance (Ventilator / Monitor)</option>
+                            <option value="Basic Life Support (BLS) Ambulance">🚐 Basic Life Support (BLS) Ambulance (Oxygen + Paramedic)</option>
+                            <option value="Government Emergency Ambulance (108 Service)">🚨 Government Emergency Ambulance (108 Free Service)</option>
+                            <option value="Patient Transport Vehicle (PTV)">🚗 Patient Transport Vehicle (PTV - Non-Critical)</option>
+                            <option value="Private / Family Arranged Vehicle">🚘 Private / Family Arranged Vehicle</option>
                           </select>
                         </div>
 
-                        {/* Search Input */}
-                        <div style={{ flex: 1, minWidth: 160 }}>
+                        <div>
+                          <label style={{ display: 'block', fontSize: 11.5, fontWeight: 800, color: '#475569', textTransform: 'uppercase', marginBottom: 6 }}>
+                            Dispatch Notes / Paramedic En-Route Instructions (Optional):
+                          </label>
                           <input
                             type="text"
-                            placeholder="Search facility name or location..."
-                            value={facilitySearch}
-                            onChange={(e) => {
-                              setFacilitySearch(e.target.value)
-                              loadNearbyFacilities(radiusKm, facilityType, e.target.value)
-                            }}
+                            value={dispatchNotes}
+                            onChange={(e) => setDispatchNotes(e.target.value)}
+                            placeholder="e.g., Continuous O2 @ 3 L/min, vital check Q15 min, tertiary ICU pre-alerted"
                             style={{
                               width: '100%',
-                              padding: '6px 12px',
-                              borderRadius: 6,
-                              fontSize: 12,
+                              padding: '10px 12px',
+                              borderRadius: 8,
                               border: '1.5px solid #cbd5e1',
-                              background: '#ffffff',
+                              fontSize: 13,
+                              background: '#f8fafc',
+                              color: '#0f172a',
                             }}
                           />
                         </div>
                       </div>
-
-                      {/* Facilities List Grid */}
-                      {loadingFacilities ? (
-                        <div style={{ textAlign: 'center', padding: '40px', color: '#64748b' }}>
-                          <RefreshCw size={22} className="animate-spin" style={{ margin: '0 auto 8px' }} />
-                          <div>Scanning radar for facilities in selected range...</div>
-                        </div>
-                      ) : nearbyFacilities.length === 0 ? (
-                        <div style={{ padding: '24px', textAlign: 'center', background: '#f8fafc', borderRadius: 8, border: '1px dashed #cbd5e1', color: '#64748b', fontSize: 13 }}>
-                          No healthcare facilities found within {radiusKm ? `${radiusKm} km` : 'this criteria'}. Try expanding the radius or changing the facility type.
-                        </div>
-                      ) : (
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12, maxHeight: '400px', overflowY: 'auto', paddingRight: 4 }}>
-                          {nearbyFacilities.map((fac) => {
-                            const isPicked = selectedFacilityId === fac.id
-                            return (
-                              <div
-                                key={fac.id}
-                                onClick={() => setSelectedFacilityId(fac.id)}
-                                style={{
-                                  padding: '14px 16px',
-                                  borderRadius: 10,
-                                  border: isPicked ? '2px solid #4338ca' : '1.5px solid #e2e8f0',
-                                  background: isPicked ? '#f5f3ff' : '#ffffff',
-                                  cursor: 'pointer',
-                                  display: 'flex',
-                                  flexDirection: 'column',
-                                  gap: 8,
-                                  transition: 'all 0.15s ease',
-                                  boxShadow: isPicked ? '0 3px 12px rgba(67, 56, 202, 0.15)' : 'none',
-                                }}
-                              >
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                    <input
-                                      type="radio"
-                                      name="radar_facility"
-                                      checked={isPicked}
-                                      onChange={() => setSelectedFacilityId(fac.id)}
-                                      style={{ accentColor: '#4338ca', cursor: 'pointer' }}
-                                    />
-                                    <strong style={{ fontSize: 13.5, color: '#0f172a' }}>{fac.name}</strong>
-                                  </div>
-                                  <span
-                                    style={{
-                                      fontSize: 11,
-                                      fontWeight: 800,
-                                      padding: '2px 7px',
-                                      borderRadius: 5,
-                                      background: '#ede9fe',
-                                      color: '#4338ca',
-                                      whiteSpace: 'nowrap',
-                                    }}
-                                  >
-                                    📍 {fac.distance_km} km
-                                  </span>
-                                </div>
-
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                                  <span
-                                    style={{
-                                      fontSize: 10.5,
-                                      fontWeight: 700,
-                                      padding: '2px 6px',
-                                      borderRadius: 4,
-                                      background: '#f1f5f9',
-                                      color: '#334155',
-                                    }}
-                                  >
-                                    {fac.hub_type}
-                                  </span>
-                                  {fac.phone && (
-                                    <span style={{ fontSize: 11, color: '#64748b' }}>
-                                      ☎️ {fac.phone}
-                                    </span>
-                                  )}
-                                </div>
-
-                                <div style={{ fontSize: 11.5, color: '#64748b', lineHeight: 1.4 }}>
-                                  {fac.address}
-                                </div>
-
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, borderTop: '1px solid #f1f5f9', paddingTop: 8 }}>
-                                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                                    {(fac.specialties || []).slice(0, 3).map((spec, sidx) => (
-                                      <span key={sidx} style={{ fontSize: 9.5, background: '#f8fafc', border: '1px solid #e2e8f0', padding: '1px 5px', borderRadius: 3, color: '#475569' }}>
-                                        {spec}
-                                      </span>
-                                    ))}
-                                  </div>
-                                  <a
-                                    href={fac.google_maps_directions_url}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    onClick={(e) => e.stopPropagation()}
-                                    style={{
-                                      fontSize: 11,
-                                      fontWeight: 700,
-                                      color: '#2563eb',
-                                      textDecoration: 'none',
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      gap: 4,
-                                      padding: '3px 8px',
-                                      borderRadius: 4,
-                                      background: '#eff6ff',
-                                    }}
-                                  >
-                                    <Navigation size={11} />
-                                    <span>Google Maps Route</span>
-                                  </a>
-                                </div>
-                              </div>
-                            )
-                          })}
-                        </div>
-                      )}
                     </div>
 
                     {/* 4. Final Confirmation & Dispatch Action Bar */}
@@ -1615,11 +1460,9 @@ export default function VerificationPage() {
                           Selected Target Facility for Transfer:
                         </div>
                         <div style={{ fontSize: 14, fontWeight: 800, marginTop: 2 }}>
-                          {(() => {
-                            const picked = nearbyFacilities.find((f) => f.id === selectedFacilityId)
-                            if (!picked) return 'Please select a facility from the radar grid'
-                            return `${picked.name} (${picked.hub_type} · ${picked.distance_km} km away)`
-                          })()}
+                          {pickedFacility
+                            ? `${pickedFacility.name} (${pickedFacility.hub_type} · ${pickedFacility.distance_km} km away)`
+                            : 'Please select a facility from the radar grid'}
                         </div>
                       </div>
 
@@ -2363,93 +2206,59 @@ export default function VerificationPage() {
             style={{
               background: '#ffffff',
               color: '#0f172a',
-              width: '740px',
-              maxWidth: '95vw',
-              maxHeight: '92vh',
+              width: '940px',
+              maxWidth: '96vw',
+              maxHeight: '94vh',
               overflowY: 'auto',
               borderRadius: 14,
-              padding: '28px 32px',
+              padding: '24px 28px',
               boxShadow: '0 25px 60px rgba(0, 0, 0, 0.4)',
               border: '2px solid #0f172a',
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Header */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '2px solid #0f172a', paddingBottom: 14, marginBottom: 18 }}>
-              <div>
-                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 1, color: '#4338ca', textTransform: 'uppercase' }}>
-                  Astra Healthcare Network · Integrated Referral Radar
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1.5px solid #e2e8f0', paddingBottom: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ background: '#059669', color: '#fff', borderRadius: 8, padding: 6, display: 'flex' }}>
+                  <CheckCircle2 size={18} />
                 </div>
-                <h2 style={{ margin: '4px 0 0', fontSize: 19, fontWeight: 900, color: '#0f172a' }}>
-                  OFFICIAL CLINICAL TRANSFER & REFERRAL SLIP
-                </h2>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: '#0f172a' }}>
+                    Referral Dispatched Successfully
+                  </h3>
+                  <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+                    Official printed transfer memorandum generated for patient handover & ambulance escort
+                  </div>
+                </div>
               </div>
               <button
                 onClick={() => setDispatchedSlipModal(false)}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b' }}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', padding: 6 }}
               >
                 <X size={20} />
               </button>
             </div>
 
-            {/* Demographics & Facility Grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, background: '#f8fafc', padding: 14, borderRadius: 8, border: '1px solid #e2e8f0', marginBottom: 16, fontSize: 12.5 }}>
-              <div>
-                <strong>Patient: </strong>{lastDispatchedSlipData.patient?.full_name} ({lastDispatchedSlipData.patient?.patient_id})
-              </div>
-              <div>
-                <strong>Age / Gender: </strong>{lastDispatchedSlipData.patient?.age} yrs / {lastDispatchedSlipData.patient?.gender}
-              </div>
-              <div>
-                <strong>Referring Doctor: </strong>Dr. {lastDispatchedSlipData.patient?.external_referral?.referring_doctor_name || 'Attending Physician'}
-              </div>
-              <div>
-                <strong>Target Facility: </strong>{lastDispatchedSlipData.facility?.name} ({lastDispatchedSlipData.facility?.distance_km} km away)
-              </div>
-              <div>
-                <strong>Facility Type: </strong>{lastDispatchedSlipData.facility?.hub_type}
-              </div>
-              <div>
-                <strong>Dispatched At: </strong>{new Date(lastDispatchedSlipData.dispatchedAt).toLocaleString()}
-              </div>
-            </div>
+            <PrintedReferralForm
+              patient={lastDispatchedSlipData?.patient || {}}
+              referralData={{
+                ...(lastDispatchedSlipData?.patient?.external_referral || {}),
+                target_care_hub_name: lastDispatchedSlipData?.facility?.name,
+                target_care_hub_type: lastDispatchedSlipData?.facility?.hub_type,
+                distance_km: lastDispatchedSlipData?.facility?.distance_km,
+                transport_type: transportType || 'Advanced Life Support (ALS) Ambulance',
+                dispatched_by_worker_name: workerInfo?.full_name || 'Mid-Level Health Worker',
+              }}
+              rawNote={lastDispatchedSlipData?.note || ''}
+              showPrintButton={true}
+            />
 
-            {/* Final Clinical Note */}
-            <div style={{ marginBottom: 20 }}>
-              <div style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', marginBottom: 6, color: '#0f172a' }}>
-                Clinical Referral Memorandum & Transport Protocols:
-              </div>
-              <pre style={{
-                background: '#f1f5f9',
-                padding: '14px 16px',
-                borderRadius: 8,
-                fontSize: 12,
-                lineHeight: 1.6,
-                whiteSpace: 'pre-wrap',
-                fontFamily: 'monospace',
-                color: '#0f172a',
-                margin: 0,
-                border: '1px solid #cbd5e1',
-              }}>
-                {lastDispatchedSlipData.note}
-              </pre>
-            </div>
-
-            {/* Footer Buttons */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, borderTop: '1px solid #e2e8f0', paddingTop: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16, borderTop: '1px solid #e2e8f0', paddingTop: 14 }}>
               <button
                 onClick={() => setDispatchedSlipModal(false)}
                 className="hw-btn-rescreen"
               >
-                Close Slip
-              </button>
-              <button
-                onClick={() => window.print()}
-                className="hw-btn-doctor-dispatch"
-                style={{ background: '#0f172a', color: '#fff', padding: '9px 20px' }}
-              >
-                <Printer size={15} />
-                <span>Print Official Referral Slip</span>
+                Close Window
               </button>
             </div>
           </div>
@@ -2627,14 +2436,6 @@ export default function VerificationPage() {
             <div className="hw-ai-drawer-tabs">
               <button
                 type="button"
-                className={`hw-ai-drawer-tab ${drawerActiveTab === 'rag' ? 'active' : ''}`}
-                onClick={() => setDrawerActiveTab('rag')}
-              >
-                <Sparkles size={13} />
-                <span>Interrogation Q&A (RAG)</span>
-              </button>
-              <button
-                type="button"
                 className={`hw-ai-drawer-tab ${drawerActiveTab === 'chat' ? 'active' : ''}`}
                 onClick={() => setDrawerActiveTab('chat')}
               >
@@ -2652,110 +2453,7 @@ export default function VerificationPage() {
             </div>
 
             {/* Drawer Content */}
-            {drawerActiveTab === 'rag' ? (
-              <div className="hw-ai-drawer-body">
-                <div className="hw-ai-drawer-hint">
-                  💬 <strong>RAG Interrogation Chatbot:</strong> Ask any question regarding {selectedCase.full_name}'s live kiosk conversation. The system retrieves real question-and-answer turns from <code>astra-conversation</code> vector database and quotes exact dialogue and timing.
-                </div>
-
-                {/* Suggestion Chips */}
-                <div className="hw-ai-drawer-chips">
-                  <button
-                    type="button"
-                    className="hw-drawer-chip"
-                    onClick={() => handleSendRagQuery('What did the patient say about fever timing and evening chills?')}
-                  >
-                    ❓ Fever timing & chills?
-                  </button>
-                  <button
-                    type="button"
-                    className="hw-drawer-chip"
-                    onClick={() => handleSendRagQuery('Did the patient disclose any chest pain or radiating discomfort?')}
-                  >
-                    ❓ Any chest pain or radiation?
-                  </button>
-                  <button
-                    type="button"
-                    className="hw-drawer-chip"
-                    onClick={() => handleSendRagQuery('What medications and chronic conditions does the patient take?')}
-                  >
-                    ❓ Medications & chronic history?
-                  </button>
-                  <button
-                    type="button"
-                    className="hw-drawer-chip"
-                    onClick={() => handleSendRagQuery('How long have the symptoms lasted and what makes them worse or better?')}
-                  >
-                    ❓ Duration & triggers?
-                  </button>
-                </div>
-
-                {/* Chat Message Stream */}
-                <div className="hw-chat-thread" ref={ragChatScrollRef}>
-                  {ragHistory.length === 0 ? (
-                    <div style={{ textAlign: 'center', padding: '36px 16px', color: '#64748b' }}>
-                      <Bot size={36} style={{ margin: '0 auto 10px', opacity: 0.4 }} />
-                      <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>
-                        Interrogation Q&A Ready for {selectedCase.full_name}
-                      </div>
-                      <div style={{ fontSize: 12, marginTop: 4, lineHeight: 1.4 }}>
-                        Ask questions about the patient's real kiosk dialogue, question timings, symptoms, or disclosures.
-                      </div>
-                    </div>
-                  ) : (
-                    ragHistory.map((item, idx) => (
-                      <div key={item.id || idx} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        <div className="hw-chat-msg-worker">
-                          {item.message}
-                        </div>
-                        <div className="hw-chat-msg-ai">
-                          <div
-                            style={{
-                              lineHeight: 1.65,
-                              fontSize: 13,
-                              whiteSpace: 'pre-line',
-                              color: '#0f172a',
-                            }}
-                          >
-                            {item.ai_reply}
-                          </div>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-
-                {/* Footer Input Bar */}
-                <div className="hw-ai-drawer-footer">
-                  <input
-                    type="text"
-                    className="hw-drawer-input"
-                    placeholder="Ask about patient's interrogation disclosures..."
-                    value={ragMessage}
-                    onChange={(e) => setRagMessage(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleSendRagQuery()
-                    }}
-                    disabled={isRagProcessing}
-                  />
-                  <button
-                    type="button"
-                    className="hw-drawer-send-btn"
-                    onClick={() => handleSendRagQuery()}
-                    disabled={isRagProcessing || !ragMessage.trim()}
-                  >
-                    {isRagProcessing ? (
-                      <RefreshCw size={14} className="animate-spin" />
-                    ) : (
-                      <>
-                        <Send size={13} />
-                        <span>Ask</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-            ) : drawerActiveTab === 'chat' ? (
+            {drawerActiveTab === 'chat' ? (
               <div className="hw-ai-drawer-body">
                 <div className="hw-ai-drawer-hint">
                   💬 <strong>Ask or Instruct:</strong> Ask what {selectedCase.full_name} stated during interrogation (e.g. <em>"What did patient say about evening fever?"</em>), or type natural instructions to adjust vitals, symptoms, or priority.

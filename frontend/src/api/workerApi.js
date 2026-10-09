@@ -99,10 +99,6 @@ export const dispensePatientMedicine = (patientId) => {
   })
 }
 
-// ── RAG Interrogation Chatbot for Verification Desk ───────────────────────
-export const askWorkerInterrogationChatbot = (patientId, query) =>
-  axios.post(`/patients/${patientId}/chat-interrogation`, { query })
-
 // ── External Referral Radar & Dispatch ─────────────────────────────────────
 export const getNearbyFacilities = (params = {}) =>
   axios.get('/care-hub/nearby-facilities', { params })

@@ -33,6 +33,16 @@ class LocalTTSService:
                 self._pipelines[kokoro_code] = KPipeline(lang_code=kokoro_code, repo_id="hexgrad/Kokoro-82M")
         return self._pipelines[kokoro_code]
 
+    def preload_models(self):
+        """Pre-loads Hindi and English Kokoro TTS models during server startup."""
+        try:
+            print("[LocalTTS] Pre-loading Kokoro TTS pipelines (English + Hindi)...")
+            self._load_pipeline("a")
+            self._load_pipeline("h")
+            print("[LocalTTS] Kokoro TTS pipelines pre-loaded.")
+        except Exception as e:
+            print(f"[LocalTTS] TTS preload notice: {e}")
+
     def _synthesize_sync(self, text: str, lang_code: str, speed: float = 1.0) -> Optional[str]:
         # Determine language code for Kokoro
         # 'h' for Hindi, 'a' for American English, 'b' for British English

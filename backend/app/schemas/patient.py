@@ -43,6 +43,9 @@ class PatientOut(BaseModel):
     care_hub_id: str
     registered_by: str
     created_at: datetime
+    consent_given: bool = False
+    consent_timestamp: Optional[datetime] = None
+    consent_details: Optional[Dict[str, Any]] = None
     ai_summary: Optional[Dict[str, Any]] = None
     prescription_records: Optional[List[Dict[str, Any]]] = None
     verified_by: Optional[str] = None
@@ -148,7 +151,13 @@ class ExternalReferralDispatchWorkerRequest(BaseModel):
     target_care_hub_name: str
     target_care_hub_type: Optional[str] = None
     target_care_hub_distance_km: Optional[float] = None
+    distance_km: Optional[float] = None
+    transport_type: Optional[str] = None
+    dispatch_notes: Optional[str] = None
     updated_referral_note: str
     worker_id: Optional[str] = None
     worker_name: Optional[str] = None
+
+    class Config:
+        extra = "ignore"
 

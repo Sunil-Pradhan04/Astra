@@ -197,6 +197,7 @@ class RagTriageService:
             already_stated = parsed.get("already_stated_details", {})
 
             if gap_questions and len(gap_questions) > 0:
+                gap_questions = gap_questions[:4]  # Enforce at most 4 follow-up questions
                 print(f"[RagTriageService] Analyzed clinical gaps for symptoms: {symptoms_identified}. Generated {len(gap_questions)} gap questions.")
                 return {
                     "symptoms_identified": symptoms_identified,
@@ -209,7 +210,7 @@ class RagTriageService:
         return self._build_fallback_gap_plan(narrative_en, lang_name, lang_code)
 
     def _build_fallback_gap_plan(self, narrative_en: str, lang_name: str, lang_code: str) -> Dict[str, Any]:
-        """Provides deterministic localized gap questions for the core clinical dimensions."""
+        """Provides deterministic localized gap questions for the core clinical dimensions (at most 4)."""
         if "hi" in lang_code:
             gap_questions = [
                 {
@@ -234,18 +235,11 @@ class RagTriageService:
                     "question_text": "तकलीफ का अहसास कैसा है (चुभन, भारीपन, जलन या खिंचाव), और 1 से 10 के पैमाने पर यह कितना गंभीर है?"
                 },
                 {
-                    "gap_type": "diurnal_timing",
-                    "target_symptom": "Diurnal Pattern",
-                    "clinical_intent": "Check diurnal pattern (e.g., evening fever spikes or shivering chills)",
-                    "question_text_en": "Does the discomfort worsen at any specific time, such as in the evening with cold chills, or is it constant?",
-                    "question_text": "क्या यह तकलीफ किसी खास समय, जैसे शाम को ठंड लगकर बुखार के रूप में ज्यादा बढ़ती है, या लगातार रहती है?"
-                },
-                {
                     "gap_type": "triggers_and_history",
-                    "target_symptom": "Triggers & Medications",
-                    "clinical_intent": "Assess aggravating/relieving factors, prior medicines, and chronic conditions",
-                    "question_text_en": "What makes your symptoms worse or better, and have you taken any medicines like paracetamol or have existing conditions like BP or diabetes?",
-                    "question_text": "क्या किसी काम से तकलीफ बढ़ती या कम होती है, क्या आपने कोई दवा जैसे पैरासिटामोल ली है, और क्या आपको बीपी या शुगर की पुरानी बीमारी है?"
+                    "target_symptom": "Pattern & Medications",
+                    "clinical_intent": "Assess diurnal timing, aggravating factors, and prior medicines taken",
+                    "question_text_en": "Does the discomfort worsen at any specific time like evenings with chills, and have you taken any medicines like paracetamol?",
+                    "question_text": "क्या यह तकलीफ शाम को ठंड लगकर या किसी खास समय बढ़ती है, और क्या आपने इसके लिए कोई दवा जैसे पैरासिटामोल ली है?"
                 }
             ]
         elif "od" in lang_code:
@@ -272,18 +266,11 @@ class RagTriageService:
                     "question_text": "କଷ୍ଟର ଅନୁଭବ କିପରି ଅଛି (ଜଳାପୋଡ଼ା, ଭାରୀପଣ ବା ବିନ୍ଧା), ଏବଂ ୧ ରୁ ୧୦ ମଧ୍ୟରେ ଏହା କେତେ ତୀବ୍ର?"
                 },
                 {
-                    "gap_type": "diurnal_timing",
-                    "target_symptom": "Diurnal Pattern",
-                    "clinical_intent": "Check diurnal pattern (e.g., evening fever spikes or shivering chills)",
-                    "question_text_en": "Does the discomfort worsen at any specific time, such as in the evening with cold chills, or is it constant?",
-                    "question_text": "ଏହି କଷ୍ଟ କୌଣସି ନିର୍ଦ୍ଦିଷ୍ଟ ସମୟରେ, ଯେପରିକି ସନ୍ଧ୍ୟା ସମୟରେ କମ୍ପନ ଦେଇ ଜ୍ୱର ବଢ଼ୁଛି କି, ନା ସବୁବେଳେ ରହୁଛି?"
-                },
-                {
                     "gap_type": "triggers_and_history",
-                    "target_symptom": "Triggers & Medications",
-                    "clinical_intent": "Assess aggravating/relieving factors, prior medicines, and chronic conditions",
-                    "question_text_en": "What makes your symptoms worse or better, and have you taken any medicines like paracetamol or have existing conditions like BP or diabetes?",
-                    "question_text": "କୌଣସି କାର୍ଯ୍ୟ କଲେ କଷ୍ଟ ବଢ଼ୁଛି କି, ଆପଣ କୌଣସି ଔଷଧ ଖାଇଛନ୍ତି କି, ଏବଂ ବିପି ବା ମଧୁମେହ ଭଳି ପୁରୁଣା ରୋଗ ଅଛି କି?"
+                    "target_symptom": "Pattern & Medications",
+                    "clinical_intent": "Assess diurnal timing, aggravating factors, and prior medicines taken",
+                    "question_text_en": "Does the discomfort worsen at any specific time like evenings with chills, and have you taken any medicines like paracetamol?",
+                    "question_text": "ଏହି କଷ୍ଟ ସନ୍ଧ୍ୟା ସମୟରେ କମ୍ପନ ଦେଇ ବଢ଼ୁଛି କି, ଏବଂ ଆପଣ ଏଥିପାଇଁ ପାରାସିଟାମୋଲ ଭଳି କୌଣସି ଔଷଧ ଖାଇଛନ୍ତି କି?"
                 }
             ]
         else:
@@ -310,18 +297,11 @@ class RagTriageService:
                     "question_text": "How would you describe the sensation (throbbing, burning, heavy pressure), and how severe is it on a scale of 1 to 10?"
                 },
                 {
-                    "gap_type": "diurnal_timing",
-                    "target_symptom": "Diurnal Pattern",
-                    "clinical_intent": "Check diurnal pattern (e.g., evening fever spikes or shivering chills)",
-                    "question_text_en": "Does the discomfort worsen at any specific time, such as in the evening with cold chills, or is it constant?",
-                    "question_text": "Does the discomfort worsen at any specific time, such as in the evening with cold chills, or is it constant?"
-                },
-                {
                     "gap_type": "triggers_and_history",
-                    "target_symptom": "Triggers & Medications",
-                    "clinical_intent": "Assess aggravating/relieving factors, prior medicines, and chronic conditions",
-                    "question_text_en": "What makes your symptoms worse or better, and have you taken any medicines like paracetamol or have existing conditions like BP or diabetes?",
-                    "question_text": "What makes your symptoms worse or better, and have you taken any medicines like paracetamol or have existing conditions like BP or diabetes?"
+                    "target_symptom": "Pattern & Medications",
+                    "clinical_intent": "Assess diurnal timing, aggravating factors, and prior medicines taken",
+                    "question_text_en": "Does the discomfort worsen at any specific time like evenings with chills, and have you taken any medicines like paracetamol?",
+                    "question_text": "Does the discomfort worsen at any specific time like evenings with chills, and have you taken any medicines like paracetamol?"
                 }
             ]
 

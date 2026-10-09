@@ -277,6 +277,7 @@ Generate the JSON response matching this schema:
             if isinstance(st, dict) and st.get("clinical_narrative"):
                 chief_complaints = f"{chief_complaints} | Narrative: {st.get('clinical_narrative')}"
 
+        current_time_str = datetime.utcnow().strftime("%d %B %Y, %I:%M %p UTC")
         user_prompt = build_clinical_referral_note_prompt(
             patient_name=p_name,
             patient_id=p_id,
@@ -290,6 +291,7 @@ Generate the JSON response matching this schema:
             referring_facility_name=referring_facility_name,
             urgency=urgency,
             clinical_notes=clinical_notes,
+            current_datetime=current_time_str,
         )
 
         try:

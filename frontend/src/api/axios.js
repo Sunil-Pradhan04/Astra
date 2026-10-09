@@ -1,7 +1,19 @@
 import axios from 'axios'
 
+export const getDynamicApiBase = () => {
+  if (import.meta.env.VITE_API_BASE_URL) {
+    return import.meta.env.VITE_API_BASE_URL
+  }
+  if (typeof window !== 'undefined' && window.location) {
+    const host = window.location.hostname
+    const protocol = window.location.protocol || 'http:'
+    return `${protocol}//${host}:8000/api`
+  }
+  return 'http://localhost:8000/api'
+}
+
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api',
+  baseURL: getDynamicApiBase(),
   headers: { 'Content-Type': 'application/json' },
 })
 

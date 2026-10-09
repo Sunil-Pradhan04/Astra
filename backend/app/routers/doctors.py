@@ -28,7 +28,6 @@ from app.schemas.patient import (
 from app.dependencies.auth import get_current_admin, get_current_doctor
 from app.core.security import hash_password, generate_id, generate_password
 from app.services.email_service import send_email, staff_credentials_email, patient_prescription_email
-from app.services.conversation_rag_service import conversation_rag
 from app.services.health_worker_ai_service import health_worker_ai
 
 router = APIRouter(prefix="/doctors", tags=["Doctors"])
@@ -402,30 +401,6 @@ async def doctor_heartbeat(doctor: Doctor = Depends(get_current_doctor)):
     return {"status": "ok", "doctor_id": doctor.doctor_id}
 
 
-class DoctorInterrogationChatRequest(BaseModel):
-    query: str
-    user_name: Optional[str] = None
-
-
-@router.post("/desk/{patient_id}/chat-interrogation")
-async def doctor_chat_patient_interrogation(
-    patient_id: str,
-    data: DoctorInterrogationChatRequest,
-    doctor: Doctor = Depends(get_current_doctor),
-):
-    """
-    RAG-powered clinical chatbot for attending doctors. Answers clinical queries about
-    what the patient actually disclosed during autonomous kiosk interrogation by querying
-    Pinecone vector index 'astra-conversation' (1536 dim, cosine similarity).
-    """
-    res = await conversation_rag.answer_doctor_query(
-        patient_id=patient_id,
-        query=data.query,
-        doctor_name=doctor.full_name,
-    )
-    return res
-
-
 # ── Clinical Referral Endpoints ─────────────────────────────────────────────
 
 @router.get("/internal-doctors")
@@ -479,6 +454,35 @@ async def get_internal_doctors(doctor: Doctor = Depends(get_current_doctor)):
     }
 
 
+async def _safe_find_patient(patient_id: str) -> Optional[Patient]:
+    p = await Patient.find_one(Patient.patient_id == patient_id)
+    if p:
+        return p
+    try:
+        p = await Patient.get(patient_id)
+        if p:
+            return p
+    except Exception:
+        pass
+    return None
+
+
+async def _safe_get_hub(hub_id: Optional[str]) -> Optional[CareHub]:
+    if not hub_id:
+        return None
+    try:
+        hub = await CareHub.get(hub_id)
+        if hub:
+            return hub
+    except Exception:
+        pass
+    try:
+        return await CareHub.find_one(CareHub.hub_id == hub_id)
+    except Exception:
+        pass
+    return None
+
+
 @router.post("/desk/refer-internal/{patient_id}")
 async def refer_patient_internal(
     patient_id: str,
@@ -489,15 +493,15 @@ async def refer_patient_internal(
     Refers a patient to another doctor within the same hospital, immediately
     transferring the patient to the target doctor's queue with referral notes.
     """
-    patient = await Patient.find_one(Patient.patient_id == patient_id)
+    patient = await _safe_find_patient(patient_id)
     if not patient:
-        raise HTTPException(404, f"Patient {patient_id} not found")
+        raise HTTPException(404, f"Patient {patient_id} not found in database")
 
     target_doctor = await Doctor.find_one(Doctor.doctor_id == data.target_doctor_id)
     if not target_doctor:
         raise HTTPException(404, f"Target doctor {data.target_doctor_id} not found")
 
-    if target_doctor.care_hub_id != doctor.care_hub_id:
+    if doctor.care_hub_id and target_doctor.care_hub_id and target_doctor.care_hub_id != doctor.care_hub_id:
         raise HTTPException(400, "Target doctor must be in the same hospital facility")
 
     # Update patient assignment
@@ -529,8 +533,9 @@ async def refer_patient_internal(
     note_entry = f"[Internal Referral from Dr. {doctor.full_name} -> Dr. {target_doctor.full_name}]: {data.reason}"
     if data.notes:
         note_entry += f" | Notes: {data.notes}"
-    if patient.clinical_notes:
-        patient.clinical_notes = f"{patient.clinical_notes}\n{note_entry}"
+    existing_notes = getattr(patient, "clinical_notes", None) or ""
+    if existing_notes:
+        patient.clinical_notes = f"{existing_notes}\n{note_entry}"
     else:
         patient.clinical_notes = note_entry
 
@@ -554,14 +559,11 @@ async def generate_patient_referral_note(
     Uses Sarvam AI LLM to automatically synthesize an official clinical referral memorandum
     based on the doctor's reason for referral and possible diagnosis.
     """
-    patient = await Patient.find_one(Patient.patient_id == patient_id)
+    patient = await _safe_find_patient(patient_id)
     if not patient:
         raise HTTPException(404, f"Patient {patient_id} not found")
 
-    hub = None
-    if doctor.care_hub_id:
-        hub = await CareHub.get(doctor.care_hub_id)
-
+    hub = await _safe_get_hub(doctor.care_hub_id)
     hub_name = hub.name if hub else "Astra Care Hub Facility"
 
     p_dict = patient.model_dump() if hasattr(patient, "model_dump") else patient.dict()
@@ -598,14 +600,11 @@ async def refer_patient_external(
     Mid-Level Health Worker review queue ('pending_external_referral') to select destination
     facility in radius and dispatch.
     """
-    patient = await Patient.find_one(Patient.patient_id == patient_id)
+    patient = await _safe_find_patient(patient_id)
     if not patient:
         raise HTTPException(404, f"Patient {patient_id} not found")
 
-    hub = None
-    if doctor.care_hub_id:
-        hub = await CareHub.get(doctor.care_hub_id)
-
+    hub = await _safe_get_hub(doctor.care_hub_id)
     hub_name = hub.name if hub else "Current Care Hub"
 
     external_ref_record = {
@@ -631,8 +630,9 @@ async def refer_patient_external(
         f"[External Referral Initiated by Dr. {doctor.full_name}]: "
         f"Diagnosis: {data.possible_diagnosis} | Reason: {data.reason_for_referral}"
     )
-    if patient.clinical_notes:
-        patient.clinical_notes = f"{patient.clinical_notes}\n{note_entry}"
+    existing_notes = getattr(patient, "clinical_notes", None) or ""
+    if existing_notes:
+        patient.clinical_notes = f"{existing_notes}\n{note_entry}"
     else:
         patient.clinical_notes = note_entry
 

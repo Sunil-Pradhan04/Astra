@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     FROM_NAME: str = "Astra Healthcare"
 
     FRONTEND_URL: str = "http://localhost:5173"
+    FRONTEND_LAN_URL: str = ""
+    BACKEND_LAN_URL: str = ""
     SARVAM_AI_API_KEY: str = ""
     REDIS_URL: str = "redis://localhost:6379"
 
@@ -22,7 +24,6 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     PINECONE_API_KEY: str = ""
     PINECONE_INDEX: str = "astra-diseases"
-    PINECONE_CONVERSATION_INDEX: str = "astra-conversation"
 
     # Cloudinary Image Storage
     CLOUDINARY_CLOUD_NAME: str = ""

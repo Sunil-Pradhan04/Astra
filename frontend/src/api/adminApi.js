@@ -37,7 +37,20 @@ export const deleteDevice  = (id)   => api.delete(`/endpoint-devices/${id}`)
 export const getRecipients = ()     => api.get('/communicate/recipients')
 export const sendEmail     = (data) => api.post('/communicate/send', data)
 
-// ── Settings ──────────────────────────────────────────────────────────────────
-
 export const getProfile      = ()     => api.get('/settings/profile')
 export const updateUsername  = (name) => api.put('/settings/username', { username: name })
+
+// ── Component Test Lab (Stateless Sandbox) ──────────────────────────────────
+export const testGenerateAgentQuestion = (data) =>
+  api.post('/test/agent-question', data)
+
+export const testSimulateAgentAnswer = (formData) =>
+  api.post('/test/agent-simulate-answer', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+
+export const testOcrDocumentInspection = (formData) =>
+  api.post('/test/ocr-inspection', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+

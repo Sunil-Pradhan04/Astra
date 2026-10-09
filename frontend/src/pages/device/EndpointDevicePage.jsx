@@ -48,6 +48,7 @@ import {
   getSessionMemory,
 } from '../../api/deviceApi'
 import PrescriptionCameraModal from '../../components/device/PrescriptionCameraModal'
+import PatientConsentCard from '../../components/device/PatientConsentCard'
 
 const LANGUAGES = [
   {
@@ -152,9 +153,10 @@ export default function EndpointDevicePage() {
     }
   })
 
-  // Workflow Stages: 'select_patient' | 'language' | 'interrogation' | 'waiting_worker_input' | 'completed'
+  // Workflow Stages: 'select_patient' | 'language' | 'consent' | 'interrogation' | 'waiting_worker_input' | 'completed'
   const [stage, setStage] = useState('select_patient')
   const [selectedLanguage, setSelectedLanguage] = useState(LANGUAGES[0])
+  const [consentInfo, setConsentInfo] = useState(null)
 
   // Patient Queue & Active Patient
   const [queuedIds, setQueuedIds] = useState([])
@@ -280,18 +282,27 @@ export default function EndpointDevicePage() {
     }
   }
 
-  // ── Start Interrogation Session ───────────────────────────────────────
-  const handleSelectLanguageAndStart = async (lang) => {
+  // ── Language Selection -> Advance to Consent Stage ─────────────────────
+  const handleSelectLanguage = (lang) => {
     setSelectedLanguage(lang)
+    setStage('consent')
+  }
+
+  // ── Confirm Consent & Start AI Interrogation ───────────────────────────
+  const handleConfirmConsentAndStart = async (consentDetails) => {
     setIsProcessing(true)
     setErrorMsg('')
     setMicroStep('idle')
+    setConsentInfo(consentDetails)
 
     try {
       const res = await startKioskSession({
         patient_id: activePatientId,
-        language: lang.key,
+        language: selectedLanguage.key,
         tts_engine: ttsEngine,
+        consent_given: true,
+        consent_timestamp: consentDetails?.consent_timestamp || new Date().toISOString(),
+        consent_details: consentDetails,
       })
 
       const data = res.data
@@ -324,6 +335,10 @@ export default function EndpointDevicePage() {
     } finally {
       setIsProcessing(false)
     }
+  }
+
+  const handleSelectLanguageAndStart = (lang) => {
+    handleSelectLanguage(lang)
   }
 
   // ── Voice Recording via MediaRecorder ─────────────────────────────────
@@ -713,6 +728,7 @@ export default function EndpointDevicePage() {
     setQuestionsMemory([])
     setConversationHistory([])
     setCompletionData(null)
+    setConsentInfo(null)
     setIsPrescriptionPromptActive(false)
     setShowCameraModal(false)
     setIsTimerPaused(false)
@@ -1004,7 +1020,7 @@ export default function EndpointDevicePage() {
               {LANGUAGES.map((lang) => (
                 <button
                   key={lang.key}
-                  onClick={() => handleSelectLanguageAndStart(lang)}
+                  onClick={() => handleSelectLanguage(lang)}
                   className={`terminal-lang-card ${selectedLanguage.key === lang.key ? 'selected' : ''}`}
                   disabled={isProcessing}
                 >
@@ -1014,7 +1030,7 @@ export default function EndpointDevicePage() {
                     <span className="terminal-lang-en">{lang.sublabel}</span>
                   </div>
                   <div style={{ marginTop: 'auto', paddingTop: 6, fontSize: 12, fontWeight: 600, color: '#2563eb' }}>
-                    Select &amp; Start &rarr;
+                    Select Language &rarr;
                   </div>
                 </button>
               ))}
@@ -1028,7 +1044,21 @@ export default function EndpointDevicePage() {
           </div>
         )}
 
-        {/* ── STAGE 3: Clean AI Interrogation Stage (No Chat Wall, No Questions List) ── */}
+        {/* ── STAGE 3: Patient Informed Consent & Data Authorization ── */}
+        {stage === 'consent' && (
+          <PatientConsentCard
+            patient={activePatient}
+            patientId={activePatientId}
+            selectedLanguage={selectedLanguage}
+            ttsEngine={ttsEngine}
+            languages={LANGUAGES}
+            onLanguageChange={(newLang) => setSelectedLanguage(newLang)}
+            onConfirmConsent={handleConfirmConsentAndStart}
+            onBack={() => setStage('language')}
+          />
+        )}
+
+        {/* ── STAGE 4: Clean AI Interrogation Stage ── */}
         {stage === 'interrogation' && (
           <div className="terminal-asking-stage fade-in">
             
@@ -1044,6 +1074,25 @@ export default function EndpointDevicePage() {
                   </strong>
                   <span style={{ fontSize: 11, color: '#64748b', marginLeft: 8 }}>
                     Token: {activePatientId} · Language: {selectedLanguage.flag} {selectedLanguage.label}
+                  </span>
+                  <span
+                    style={{
+                      fontSize: 10.5,
+                      fontWeight: 700,
+                      background: '#ecfdf5',
+                      color: '#047857',
+                      border: '1px solid #a7f3d0',
+                      padding: '2px 8px',
+                      borderRadius: 4,
+                      marginLeft: 8,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                    }}
+                    title="Patient confirmed informed consent & authorized clinical data sharing"
+                  >
+                    <ShieldCheck size={11} />
+                    <span>Consent Granted</span>
                   </span>
                 </div>
               </div>
@@ -1658,6 +1707,26 @@ export default function EndpointDevicePage() {
             </div>
 
             <div className="terminal-modal-body">
+              <div
+                style={{
+                  background: '#f0fdf4',
+                  border: '1px solid #bbf7d0',
+                  borderRadius: 8,
+                  padding: '9px 12px',
+                  marginBottom: 12,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  fontSize: 12,
+                  color: '#166534',
+                  fontWeight: 600,
+                }}
+              >
+                <ShieldCheck size={16} color="#16a34a" />
+                <span>
+                  <strong>Patient Informed Consent:</strong> Authorized voice recording, clinical symptoms disclosure, and transmission to medical staff.
+                </span>
+              </div>
               {conversationHistory.map((msg, idx) => (
                 <div
                   key={idx}

@@ -10,6 +10,7 @@ import ReceptionPage from './pages/worker/ReceptionPage'
 import VerificationPage from './pages/worker/VerificationPage'
 import DispensingPage from './pages/worker/DispensingPage'
 import EndpointDevicePage from './pages/device/EndpointDevicePage'
+import MobilePrescriptionUploadPage from './pages/device/MobilePrescriptionUploadPage'
 import DoctorDeskPage from './pages/doctor/DoctorDeskPage'
 
 function App() {
@@ -18,6 +19,7 @@ function App() {
       {/* Public */}
       <Route path="/" element={<LandingPage />} />
       <Route path="/login/:role" element={<LoginPage />} />
+      <Route path="/mobile-upload" element={<MobilePrescriptionUploadPage />} />
 
       {/* Endpoint Device Kiosk (Autonomous AI Terminal) */}
       <Route path="/device/terminal" element={<EndpointDevicePage />} />

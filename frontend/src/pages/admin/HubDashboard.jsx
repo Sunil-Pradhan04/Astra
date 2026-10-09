@@ -10,6 +10,7 @@ import {
   Menu,
   Building2,
   ArrowLeft,
+  FlaskConical,
 } from 'lucide-react'
 import Sidebar from '../../components/admin/Sidebar'
 import DashboardTab from '../../components/admin/tabs/DashboardTab'
@@ -18,6 +19,7 @@ import AddHealthWorkersTab from '../../components/admin/tabs/AddHealthWorkersTab
 import AddEndpointDevicesTab from '../../components/admin/tabs/AddEndpointDevicesTab'
 import CommunicateTab from '../../components/admin/tabs/CommunicateTab'
 import SettingsTab from '../../components/admin/tabs/SettingsTab'
+import TestingLabTab from '../../components/admin/tabs/TestingLabTab'
 
 const TABS = [
   { id: 'dashboard',        label: 'Dashboard',         icon: LayoutDashboard },
@@ -25,6 +27,7 @@ const TABS = [
   { id: 'health-workers',   label: 'Health Workers',     icon: Users },
   { id: 'devices',          label: 'Endpoint Devices',   icon: Smartphone },
   { id: 'communicate',      label: 'Communicate',        icon: Mail },
+  { id: 'testing-lab',      label: 'Component Test Lab', icon: FlaskConical },
   { id: 'settings',         label: 'Settings',           icon: Settings },
 ]
 
@@ -47,6 +50,7 @@ export default function HubDashboard() {
       case 'health-workers': return <AddHealthWorkersTab hub={hub} />
       case 'devices':        return <AddEndpointDevicesTab hub={hub} />
       case 'communicate':    return <CommunicateTab hub={hub} />
+      case 'testing-lab':    return <TestingLabTab hub={hub} />
       case 'settings':       return <SettingsTab hub={hub} admin={admin} />
       default:               return null
     }

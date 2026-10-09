@@ -36,6 +36,11 @@ class Patient(Document):
     registered_by: str                   # Worker ID (e.g. REC-12345)
     created_at: datetime = datetime.utcnow()
 
+    # Patient Data Sharing & AI Interrogation Consent
+    consent_given: bool = False
+    consent_timestamp: Optional[datetime] = None
+    consent_details: Optional[Dict[str, Any]] = None
+
     # AI Agent output (populated after AI interrogation)
     ai_summary: Optional[Dict[str, Any]] = None
     prescription_records: Optional[List[Dict[str, Any]]] = None
@@ -55,7 +60,9 @@ class Patient(Document):
     # Doctor Prescription & Digital Treatment Record
     doctor_prescription: Optional[Dict[str, Any]] = None
 
-    # Clinical Referrals (Inside Hospital / Hospital to Another)
+    # Clinical Notes & Referrals (Inside Hospital / Hospital to Another)
+    clinical_notes: Optional[str] = None
+    updated_at: Optional[datetime] = None
     internal_referral: Optional[Dict[str, Any]] = None
     external_referral: Optional[Dict[str, Any]] = None
 
