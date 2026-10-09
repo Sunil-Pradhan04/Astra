@@ -35,6 +35,7 @@ import {
   Thermometer,
   Heart,
   Scale,
+  Languages,
 } from 'lucide-react'
 import {
   getQueuedPatientIds,
@@ -49,6 +50,7 @@ import {
 } from '../../api/deviceApi'
 import PrescriptionCameraModal from '../../components/device/PrescriptionCameraModal'
 import PatientConsentCard from '../../components/device/PatientConsentCard'
+import MedicalTranslationMachine from '../../components/common/MedicalTranslationMachine'
 
 const LANGUAGES = [
   {
@@ -157,6 +159,7 @@ export default function EndpointDevicePage() {
   const [stage, setStage] = useState('select_patient')
   const [selectedLanguage, setSelectedLanguage] = useState(LANGUAGES[0])
   const [consentInfo, setConsentInfo] = useState(null)
+  const [isTranslatorOpen, setIsTranslatorOpen] = useState(false)
 
   // Patient Queue & Active Patient
   const [queuedIds, setQueuedIds] = useState([])
@@ -222,9 +225,9 @@ export default function EndpointDevicePage() {
 
   // ── Heartbeat ──────────────────────────────────────────────────────────
   useEffect(() => {
-    deviceHeartbeat().catch(() => {})
+    deviceHeartbeat().catch(() => { })
     const interval = setInterval(() => {
-      deviceHeartbeat().catch(() => {})
+      deviceHeartbeat().catch(() => { })
     }, 2 * 60 * 1000)
     return () => clearInterval(interval)
   }, [])
@@ -353,8 +356,8 @@ export default function EndpointDevicePage() {
         mimeType = MediaRecorder.isTypeSupported('audio/webm')
           ? 'audio/webm'
           : MediaRecorder.isTypeSupported('audio/ogg')
-          ? 'audio/ogg'
-          : ''
+            ? 'audio/ogg'
+            : ''
       }
       const options = mimeType ? { mimeType } : {}
 
@@ -444,7 +447,7 @@ export default function EndpointDevicePage() {
       t.includes('ପ୍ରେସକ୍ରିପସନ ଅଛି') ||
       t.includes('ରିପୋର୍ଟ ଅଛି') ||
       ((t.includes('report') || t.includes('prescription') || t.includes('parcha')) &&
-       (t.includes('yes') || t.includes('yeah') || t.includes('haan') || t.includes('ha') || t.includes('show') || t.includes('here') || t.trim().split(/\s+/).length <= 2))
+        (t.includes('yes') || t.includes('yeah') || t.includes('haan') || t.includes('ha') || t.includes('show') || t.includes('here') || t.trim().split(/\s+/).length <= 2))
     )
   }
 
@@ -568,7 +571,7 @@ export default function EndpointDevicePage() {
       setIsProcessing(false)
     }
   }
- 
+
   // ── Fetch Active Temporary Clinical Memory Data ───────────────────────
   const handleFetchTemporaryMemory = async () => {
     if (!sessionId) return
@@ -740,7 +743,7 @@ export default function EndpointDevicePage() {
   const handleExitTerminal = async () => {
     try {
       await deviceLogout()
-    } catch {}
+    } catch { }
     localStorage.removeItem('device_token')
     localStorage.removeItem('device_info')
     navigate('/')
@@ -910,6 +913,25 @@ export default function EndpointDevicePage() {
             </div>
           </div>
 
+          {/* 11-Language Translator Button */}
+          <button
+            type="button"
+            onClick={() => setIsTranslatorOpen(true)}
+            className="terminal-exit-btn"
+            style={{
+              background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+              color: '#ffffff',
+              border: 'none',
+              cursor: 'pointer',
+              fontWeight: 700,
+            }}
+            title="Open 11-Language Translation Machine"
+            id="btn-kiosk-translator"
+          >
+            <Languages size={14} />
+            <span>11-Lang Translator</span>
+          </button>
+
           <button onClick={handleExitTerminal} className="terminal-exit-btn">
             <LogOut size={13} />
             <span>Exit</span>
@@ -919,7 +941,7 @@ export default function EndpointDevicePage() {
 
       {/* ── Main Container ── */}
       <main className="terminal-body">
-        
+
         {/* ── STAGE 1: Patient Arrival & Selection ── */}
         {stage === 'select_patient' && (
           <div className="terminal-card fade-in">
@@ -1061,7 +1083,7 @@ export default function EndpointDevicePage() {
         {/* ── STAGE 4: Clean AI Interrogation Stage ── */}
         {stage === 'interrogation' && (
           <div className="terminal-asking-stage fade-in">
-            
+
             {/* Top Patient Bar & Discreet Review Tools */}
             <div className="terminal-asking-topbar">
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -1158,30 +1180,28 @@ export default function EndpointDevicePage() {
 
             {/* ── Center Stage: AI Question Card ── */}
             <div className="terminal-asking-card">
-              
+
               {/* AI Avatar with Sound Waves */}
               <div className="terminal-ai-avatar-wrap">
                 {isPlayingAudio && <div className="terminal-sound-waves" />}
                 <div
-                  className={`terminal-ai-avatar-core ${
-                    isPlayingAudio ? 'speaking' : isRecording ? 'listening' : ''
-                  }`}
+                  className={`terminal-ai-avatar-core ${isPlayingAudio ? 'speaking' : isRecording ? 'listening' : ''
+                    }`}
                 >
                   {isRecording ? <Mic size={32} /> : isPlayingAudio ? <Volume2 size={32} /> : <Bot size={32} />}
                 </div>
 
                 <span
-                  className={`terminal-ai-status-pill ${
-                    isPlayingAudio ? 'speaking' : isRecording ? 'listening' : ''
-                  }`}
+                  className={`terminal-ai-status-pill ${isPlayingAudio ? 'speaking' : isRecording ? 'listening' : ''
+                    }`}
                 >
                   {isPlayingAudio
                     ? '🔊 AI Speaking...'
                     : isRecording
-                    ? `🎙️ Listening (${recordingSeconds}s)...`
-                    : isProcessing
-                    ? '⚡ AI Reasoning & Checking Urgency...'
-                    : 'Astra Clinical AI'}
+                      ? `🎙️ Listening (${recordingSeconds}s)...`
+                      : isProcessing
+                        ? '⚡ AI Reasoning & Checking Urgency...'
+                        : 'Astra Clinical AI'}
                 </span>
               </div>
 
@@ -2114,6 +2134,47 @@ export default function EndpointDevicePage() {
           onClose={() => setShowCameraModal(false)}
         />
       )}
+
+      {/* ── Floating Translation Trigger Button for Kiosk Nurse/Operator ── */}
+      <button
+        type="button"
+        onClick={() => setIsTranslatorOpen(true)}
+        style={{
+          position: 'fixed',
+          bottom: 24,
+          right: 24,
+          zIndex: 900,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '12px 20px',
+          borderRadius: 30,
+          background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+          color: '#ffffff',
+          border: '2px solid rgba(255, 255, 255, 0.4)',
+          fontWeight: 800,
+          fontSize: 13,
+          boxShadow: '0 8px 24px rgba(2, 132, 199, 0.45)',
+          cursor: 'pointer',
+          transition: 'all 0.2s ease',
+        }}
+        title="Open 11-Language Translation Machine"
+      >
+        <Languages size={18} />
+        <span>Ask in 11 Languages</span>
+      </button>
+
+      {/* ── 11-Language Medical Translation Machine Modal ── */}
+      <MedicalTranslationMachine
+        isOpen={isTranslatorOpen}
+        onClose={() => setIsTranslatorOpen(false)}
+        defaultTargetLang={selectedLanguage?.code || 'hi-IN'}
+        patientName={activePatient?.full_name || 'Patient'}
+        onInsertText={(translatedText) => {
+          setTextAnswer((prev) => (prev ? `${prev} ${translatedText}` : translatedText))
+          setShowTextInput(true)
+        }}
+      />
     </div>
   )
 }

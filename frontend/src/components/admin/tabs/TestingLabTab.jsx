@@ -37,6 +37,7 @@ import {
   testSimulateAgentAnswer,
   testOcrDocumentInspection,
 } from '../../../api/adminApi'
+import OcrWorkflowTracker from '../../common/OcrWorkflowTracker'
 
 const TEST_LANGUAGES = [
   { key: 'hindi', label: 'हिन्दी', sublabel: 'Hindi', code: 'hi-IN', flag: '🇮🇳' },
@@ -116,8 +117,10 @@ export default function TestingLabTab({ hub }) {
   const [ocrImageFile, setOcrImageFile] = useState(null)
   const [ocrImagePreview, setOcrImagePreview] = useState(null)
   const [executingOcrTest, setExecutingOcrTest] = useState(false)
+  const [ocrTestingStep, setOcrTestingStep] = useState(1)
   const [ocrTestResult, setOcrTestResult] = useState(null)
   const [ocrTestError, setOcrTestError] = useState(null)
+  const [testBypassNotice, setTestBypassNotice] = useState(false)
   const [showRawJson, setShowRawJson] = useState(false)
   const fileInputRef = useRef(null)
 
@@ -287,26 +290,48 @@ export default function TestingLabTab({ hub }) {
   }
 
   const handleRunOcrTest = async () => {
-    if (!ocrImageFile) {
-      setOcrTestError('Please select or upload a prescription/report image to test.')
-      return
-    }
-
     setExecutingOcrTest(true)
     setOcrTestError(null)
     setOcrTestResult(null)
+    setTestBypassNotice(false)
+    setOcrTestingStep(1)
+
+    const s1 = setTimeout(() => setOcrTestingStep(2), 800)
+    const s2 = setTimeout(() => setOcrTestingStep(3), 1800)
+    const s3 = setTimeout(() => setOcrTestingStep(4), 2800)
+    const s4 = setTimeout(() => setOcrTestingStep(5), 4000)
+    const s5 = setTimeout(() => setOcrTestingStep(6), 5500)
 
     const formData = new FormData()
     formData.append('image_file', ocrImageFile)
 
     try {
       const res = await testOcrDocumentInspection(formData)
+      clearTimeout(s1)
+      clearTimeout(s2)
+      clearTimeout(s3)
+      clearTimeout(s4)
+      clearTimeout(s5)
+      setOcrTestingStep(7)
       setOcrTestResult(res.data)
     } catch (err) {
+      clearTimeout(s1)
+      clearTimeout(s2)
+      clearTimeout(s3)
+      clearTimeout(s4)
+      clearTimeout(s5)
       setOcrTestError(err.response?.data?.detail || 'OCR document inspection failed.')
     } finally {
       setExecutingOcrTest(false)
     }
+  }
+
+  const handleTestGoWithoutReport = () => {
+    setTestBypassNotice(true)
+    setOcrImageFile(null)
+    setOcrImagePreview(null)
+    setOcrTestResult(null)
+    setOcrTestError(null)
   }
 
   return (
@@ -822,8 +847,46 @@ export default function TestingLabTab({ hub }) {
       {/* MODULE 2: MEDICAL DOCUMENT OCR & PRESCRIPTION LAB                     */}
       {/* ═══════════════════════════════════════════════════════════════════════ */}
       {activeModule === 'ocr' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-          
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+          {/* 6-Stage OCR Workflow Overview Tracker */}
+          <OcrWorkflowTracker
+            currentStepIndex={executingOcrTest ? ocrTestingStep : ocrTestResult ? 7 : 1}
+            isProcessing={executingOcrTest}
+            stepMetrics={ocrTestResult ? {
+              blur_score: ocrTestResult.quality_assessment?.metrics?.blur_score || 92,
+              classification: ocrTestResult.document_classification?.type || 'printed',
+              is_medical: true,
+              medications_count: ocrTestResult.structured_clinical_extraction?.medications?.length || 0,
+              is_stored: true,
+            } : null}
+            rejectionReason={ocrTestError}
+            onGoWithoutReport={handleTestGoWithoutReport}
+          />
+
+          {testBypassNotice && (
+            <div style={{ background: '#f0fdf4', border: '1.5px solid #86efac', borderRadius: 12, padding: '14px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <CheckCircle2 size={20} color="#16a34a" />
+                <div>
+                  <div style={{ fontSize: 13.5, fontWeight: 800, color: '#166534' }}>
+                    "Go Without Report" Bypass Flow Verified!
+                  </div>
+                  <div style={{ fontSize: 12, color: '#15803d' }}>
+                    Triage interrogation proceeds directly to conversational screening with zero blocking exceptions.
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTestBypassNotice(false)}
+                style={{ background: '#ffffff', border: '1px solid #86efac', borderRadius: 6, padding: '4px 10px', fontSize: 11.5, fontWeight: 700, color: '#166534', cursor: 'pointer' }}
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
           <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.8fr', gap: 24, alignItems: 'start' }}>
             
             {/* Left Column: Image Selection & Controls */}

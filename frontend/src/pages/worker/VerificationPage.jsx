@@ -31,6 +31,7 @@ import {
   Printer,
   Share2,
   Ambulance,
+  Languages,
 } from 'lucide-react'
 import {
   getGroupedPatientQueues,
@@ -44,6 +45,7 @@ import {
 } from '../../api/workerApi'
 import PrintedReferralForm from '../../components/referral/PrintedReferralForm'
 import FacilitiesMapRadar from '../../components/referral/FacilitiesMapRadar'
+import MedicalTranslationMachine from '../../components/common/MedicalTranslationMachine'
 
 const extractErrorMessage = (err, fallback) => {
   const d = err?.response?.data?.detail
@@ -359,6 +361,7 @@ export default function VerificationPage() {
 
   // View Mode: 'review' | 'edit' | 'external_referral'
   const [viewMode, setViewMode] = useState('review')
+  const [isTranslatorOpen, setIsTranslatorOpen] = useState(false)
   const [isAiDrawerOpen, setIsAiDrawerOpen] = useState(false)
   const [drawerActiveTab, setDrawerActiveTab] = useState('chat') // 'chat' | 'interrogation'
   const [editFormData, setEditFormData] = useState({
@@ -726,6 +729,24 @@ export default function VerificationPage() {
     }
   }
 
+  // ── Handler: Insert Translation into Notes / Forms ──
+  const handleInsertTranslatedText = (translatedText) => {
+    if (!translatedText) return
+    if (viewMode === 'external_referral') {
+      setEditableReferralNote((prev) => (prev ? `${prev}\n• [Patient Q&A]: ${translatedText}` : `• [Patient Q&A]: ${translatedText}`))
+      showNotification('Inserted translation into External Referral Note', 'success')
+    } else if (viewMode === 'edit') {
+      setEditFormData((prev) => ({
+        ...prev,
+        chief_complaints: prev.chief_complaints ? `${prev.chief_complaints} | ${translatedText}` : translatedText,
+      }))
+      showNotification('Inserted translation into Chief Complaints', 'success')
+    } else {
+      setWorkerNotes((prev) => (prev ? `${prev}\n• [Patient Response]: ${translatedText}` : `• [Patient Response]: ${translatedText}`))
+      showNotification('Inserted translation into Verification Remarks', 'success')
+    }
+  }
+
   // ── Handler: Request AI Re-Screening ──
   const handleRequestRescreen = async () => {
     if (!selectedCase) return
@@ -784,6 +805,70 @@ export default function VerificationPage() {
             <span>{actionNotice.text}</span>
           </div>
         )}
+
+        {/* ── Multilingual Translation & Fast Action Bar ── */}
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: 16,
+            background: 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+            padding: '12px 18px',
+            borderRadius: 12,
+            border: '1.5px solid #e2e8f0',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.03)',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: 8,
+                background: '#eff6ff',
+                color: '#2563eb',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <Languages size={18} />
+            </div>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 800, color: '#0f172a' }}>
+                11-Language Medical Translation Engine
+              </div>
+              <div style={{ fontSize: 11.5, color: '#64748b' }}>
+                Converse with patients in Hindi, Odia, Bengali, Telugu, Tamil, Marathi, Gujarati, Kannada, Malayalam, Punjabi, or English
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setIsTranslatorOpen(true)}
+            id="btn-verification-top-translator"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '8px 16px',
+              borderRadius: 8,
+              background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+              color: '#ffffff',
+              border: 'none',
+              fontWeight: 700,
+              fontSize: 13,
+              cursor: 'pointer',
+              boxShadow: '0 2px 6px rgba(2, 132, 199, 0.25)',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <Languages size={15} />
+            <span>Open 11-Lang Translation Machine</span>
+          </button>
+        </div>
 
         {/* ── Main Two-Column Review Desk ── */}
         <div className="hw-review-grid">
@@ -1058,6 +1143,27 @@ export default function VerificationPage() {
                         </button>
                       )}
                     </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setIsTranslatorOpen(true)}
+                      className="hw-tab-pill"
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        background: '#ecfdf5',
+                        color: '#065f46',
+                        border: '1.5px solid #6ee7b7',
+                        fontWeight: 700,
+                        fontSize: 12.5,
+                      }}
+                      id="btn-verification-patient-translator"
+                      title="Ask questions to patient in 11 Indian languages with audio and presets"
+                    >
+                      <Languages size={14} />
+                      <span>Ask Patient (11 Langs)</span>
+                    </button>
 
                     <button
                       type="button"
@@ -2589,6 +2695,15 @@ export default function VerificationPage() {
           </div>
         </div>
       )}
+
+      {/* ── 11-Language Medical Translation Machine Modal ── */}
+      <MedicalTranslationMachine
+        isOpen={isTranslatorOpen}
+        onClose={() => setIsTranslatorOpen(false)}
+        defaultTargetLang="hi-IN"
+        patientName={selectedCase?.full_name || 'Patient'}
+        onInsertText={handleInsertTranslatedText}
+      />
     </WorkerLayout>
   )
 }

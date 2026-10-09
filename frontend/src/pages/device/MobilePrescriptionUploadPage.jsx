@@ -14,8 +14,10 @@ import {
   ArrowRight,
   RefreshCw,
   Image as ImageIcon,
+  Zap,
 } from 'lucide-react'
 import { getQRMobileSession, submitQRMobileUpload } from '../../api/deviceApi'
+import OcrWorkflowTracker from '../../components/common/OcrWorkflowTracker'
 
 export default function MobilePrescriptionUploadPage() {
   const [searchParams] = useSearchParams()
@@ -31,6 +33,7 @@ export default function MobilePrescriptionUploadPage() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [uploadSuccess, setUploadSuccess] = useState(false)
   const [processingStep, setProcessingStep] = useState('')
+  const [currentStepIndex, setCurrentStepIndex] = useState(1)
   const [rejectionReason, setRejectionReason] = useState('')
 
   const cameraInputRef = useRef(null)
@@ -98,15 +101,33 @@ export default function MobilePrescriptionUploadPage() {
 
     setIsSubmitting(true)
     setRejectionReason('')
-    setProcessingStep('1/3 Uploading document to Astra server…')
+    setCurrentStepIndex(1)
+    setProcessingStep('1/6 Cleaning image & adjusting contrast…')
 
     const stepTimer1 = setTimeout(() => {
-      setProcessingStep('2/3 Checking document sharpness & clinical content…')
-    }, 1500)
+      setCurrentStepIndex(2)
+      setProcessingStep('2/6 Detecting sharpness & blur score…')
+    }, 800)
 
     const stepTimer2 = setTimeout(() => {
-      setProcessingStep('3/3 Reading medications, doses & clinical findings…')
-    }, 3200)
+      setCurrentStepIndex(3)
+      setProcessingStep('3/6 Classifying printed vs handwritten…')
+    }, 1800)
+
+    const stepTimer3 = setTimeout(() => {
+      setCurrentStepIndex(4)
+      setProcessingStep('4/6 Checking medical report keywords & layout…')
+    }, 2800)
+
+    const stepTimer4 = setTimeout(() => {
+      setCurrentStepIndex(5)
+      setProcessingStep('5/6 Extracting medicines, doses & vitals…')
+    }, 4000)
+
+    const stepTimer5 = setTimeout(() => {
+      setCurrentStepIndex(6)
+      setProcessingStep('6/6 Storing document in database & case record…')
+    }, 5500)
 
     try {
       const formData = new FormData()
@@ -115,8 +136,12 @@ export default function MobilePrescriptionUploadPage() {
       const res = await submitQRMobileUpload(token, formData)
       clearTimeout(stepTimer1)
       clearTimeout(stepTimer2)
+      clearTimeout(stepTimer3)
+      clearTimeout(stepTimer4)
+      clearTimeout(stepTimer5)
 
       if (res.data && res.data.success) {
+        setCurrentStepIndex(7)
         setUploadSuccess(true)
         setIsSubmitting(false)
       } else {
@@ -127,6 +152,9 @@ export default function MobilePrescriptionUploadPage() {
     } catch (err) {
       clearTimeout(stepTimer1)
       clearTimeout(stepTimer2)
+      clearTimeout(stepTimer3)
+      clearTimeout(stepTimer4)
+      clearTimeout(stepTimer5)
       setIsSubmitting(false)
       const msg = err.response?.data?.detail || err.response?.data?.message || 'Failed to upload photo. Please ensure Wi-Fi connection and try again.'
       setRejectionReason(msg)
@@ -564,39 +592,38 @@ export default function MobilePrescriptionUploadPage() {
                 </button>
               </div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <button
-                  onClick={handleSubmit}
-                  disabled={isSubmitting}
-                  style={{
-                    width: '100%',
-                    padding: '16px',
-                    borderRadius: '14px',
-                    backgroundColor: isSubmitting ? '#94a3b8' : '#16a34a',
-                    color: '#ffffff',
-                    border: 'none',
-                    fontWeight: '700',
-                    fontSize: '15px',
-                    cursor: isSubmitting ? 'not-allowed' : 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '10px',
-                    boxShadow: '0 4px 12px rgba(22, 163, 74, 0.25)',
-                  }}
-                >
-                  {isSubmitting ? (
-                    <>
-                      <RefreshCw size={18} style={{ animation: 'spin 1s linear infinite' }} />
-                      <span>Processing OCR…</span>
-                    </>
-                  ) : (
-                    <>
-                      <Upload size={18} />
-                      <span>Confirm & Send to Kiosk</span>
-                    </>
-                  )}
-                </button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                {isSubmitting ? (
+                  <OcrWorkflowTracker
+                    currentStepIndex={currentStepIndex}
+                    isProcessing={true}
+                    compact={true}
+                  />
+                ) : (
+                  <button
+                    onClick={handleSubmit}
+                    disabled={isSubmitting}
+                    style={{
+                      width: '100%',
+                      padding: '16px',
+                      borderRadius: '14px',
+                      backgroundColor: '#16a34a',
+                      color: '#ffffff',
+                      border: 'none',
+                      fontWeight: '700',
+                      fontSize: '15px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '10px',
+                      boxShadow: '0 4px 12px rgba(22, 163, 74, 0.25)',
+                    }}
+                  >
+                    <Upload size={18} />
+                    <span>Confirm & Send to Kiosk</span>
+                  </button>
+                )}
               </div>
             )}
           </div>

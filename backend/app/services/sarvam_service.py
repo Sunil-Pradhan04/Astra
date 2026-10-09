@@ -176,8 +176,15 @@ class SarvamAIService:
         if src_code == tgt_code or src_name == tgt_name:
             return text.strip()
 
-        # Build prompt from centralized prompts repository
-        if tgt_code == "en-IN" or tgt_name == "English":
+        # Build prompt from centralized prompts repository or direct bilingual instruction
+        if src_name != "English" and tgt_name != "English":
+            system_prompt = (
+                "You are an expert healthcare translator. "
+                f"Translate the provided clinical text from {src_name} into natural, polite {tgt_name} in its proper native script. "
+                "Output ONLY the translated text without English explanations, pronunciation guides, or quotes."
+            )
+            user_prompt = f"Translate from {src_name} into {tgt_name}:\n\n\"{text.strip()}\"\n\n{tgt_name} translation:"
+        elif tgt_code == "en-IN" or tgt_name == "English":
             system_prompt = TRANSLATION_TO_ENGLISH_SYSTEM
             user_prompt = build_translate_to_english_prompt(text, source_lang=src_name)
         else:

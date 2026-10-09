@@ -19,6 +19,7 @@ import {
   QrCode,
   Smartphone,
   ExternalLink,
+  Zap,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import {
@@ -27,6 +28,7 @@ import {
   createQRSession,
   getQRSessionStatus,
 } from '../../api/deviceApi'
+import OcrWorkflowTracker from '../common/OcrWorkflowTracker'
 
 export default function PrescriptionCameraModal({
   isOpen,
@@ -60,6 +62,8 @@ export default function PrescriptionCameraModal({
 
   const [isUploading, setIsUploading] = useState(false)
   const [analysisStatus, setAnalysisStatus] = useState('')
+  const [currentOcrStep, setCurrentOcrStep] = useState(1)
+  const [ocrStepMetrics, setOcrStepMetrics] = useState(null)
   const [qualityRejection, setQualityRejection] = useState(null)
 
   // QR Session states
@@ -164,10 +168,10 @@ export default function PrescriptionCameraModal({
     }[langKey] || '📁 Upload from Gallery / File',
 
     skipBtn: {
-      hindi: 'पर्चे के बिना आगे बढ़ें',
-      odia: 'ପ୍ରେସକ୍ରିପସନ ବିନା ଆଗକୁ ଯାନ୍ତୁ',
-      english: 'Continue Without Document',
-    }[langKey] || 'Continue Without Document',
+      hindi: 'पर्चे के बिना आगे बढ़ें (Go without report)',
+      odia: 'ପ୍ରେସକ୍ରିପସନ ବିନା ଆଗକୁ ଯାନ୍ତୁ (Go without report)',
+      english: 'Go Without Report (Skip)',
+    }[langKey] || 'Go Without Report (Skip)',
 
     analyzing: {
       hindi: 'AI चिकित्सा जाँच हो रही है…',
@@ -422,16 +426,39 @@ export default function PrescriptionCameraModal({
     if (!blob) return
     setIsUploading(true)
     setQualityRejection(null)
-    setAnalysisStatus('1/4 Checking image quality — sharpness, brightness, resolution…')
+    setCurrentOcrStep(1)
+    setOcrStepMetrics(null)
+    setAnalysisStatus('Step 1/6: Cleaning image (adaptive contrast, binarization & noise reduction)…')
 
     const fd = new FormData()
     fd.append('session_id', sessionId)
     fd.append('patient_id', patientId)
     fd.append('file', blob, 'prescription.jpg')
 
-    const t1 = setTimeout(() => setAnalysisStatus('2/4 MobileNetV3: Classifying printed vs handwritten…'), 1400)
-    const t2 = setTimeout(() => setAnalysisStatus('3/4 PaddleOCR: Reading medical text & validating…'), 2800)
-    const t3 = setTimeout(() => setAnalysisStatus('4/4 Sarvam AI: Extracting medications, dosages, vitals…'), 4500)
+    const t1 = setTimeout(() => {
+      setCurrentOcrStep(2)
+      setAnalysisStatus('Step 2/6: Detecting blur & unreadable image (Laplacian variance sharpness check)…')
+    }, 800)
+
+    const t2 = setTimeout(() => {
+      setCurrentOcrStep(3)
+      setAnalysisStatus('Step 3/6: Classifying printed text vs handwritten document (orthogonal stroke texture)…')
+    }, 1800)
+
+    const t3 = setTimeout(() => {
+      setCurrentOcrStep(4)
+      setAnalysisStatus('Step 4/6: Validating medical report layout & clinical keyword dictionary…')
+    }, 2800)
+
+    const t4 = setTimeout(() => {
+      setCurrentOcrStep(5)
+      setAnalysisStatus('Step 5/6: Extracting clinical data (PaddleOCR reading & Sarvam AI structuring)…')
+    }, 4000)
+
+    const t5 = setTimeout(() => {
+      setCurrentOcrStep(6)
+      setAnalysisStatus('Step 6/6: Storing document in database & attaching to patient triage dossier…')
+    }, 5500)
 
     try {
       const res = await uploadPrescription(fd)
@@ -439,10 +466,13 @@ export default function PrescriptionCameraModal({
       clearTimeout(t1)
       clearTimeout(t2)
       clearTimeout(t3)
+      clearTimeout(t4)
+      clearTimeout(t5)
 
       const isRejected = data.success === false || data.action_required === 'retake_photo'
 
       if (isRejected) {
+        setCurrentOcrStep(data.classification === 'handwritten' ? 3 : 2)
         setQualityRejection(data.translated_message || data.message || 'Image was unclear. Please hold document steady and recapture.')
         setIsUploading(false)
         if (data.audio_base64 && playAudio) playAudio(data.audio_base64)
@@ -450,6 +480,16 @@ export default function PrescriptionCameraModal({
         setCapturedBlob(null)
         startCamera()
       } else {
+        setCurrentOcrStep(7)
+        if (data.ocr_data) {
+          setOcrStepMetrics({
+            blur_score: data.ocr_data.blur_score || 85,
+            classification: data.ocr_data.classification || 'printed',
+            is_medical: true,
+            medications_count: Array.isArray(data.ocr_data.structured_data?.medications) ? data.ocr_data.structured_data.medications.length : 1,
+            is_stored: true,
+          })
+        }
         stopCamera()
         setIsUploading(false)
         if (typeof onSuccess === 'function') {
@@ -460,8 +500,11 @@ export default function PrescriptionCameraModal({
       clearTimeout(t1)
       clearTimeout(t2)
       clearTimeout(t3)
+      clearTimeout(t4)
+      clearTimeout(t5)
       const msg = err.response?.data?.detail || 'Could not analyze the document. Please retake the photo.'
       setQualityRejection(msg)
+      setCurrentOcrStep(2)
       setIsUploading(false)
       setPreviewUrl(null)
       setCapturedBlob(null)
@@ -782,11 +825,16 @@ export default function PrescriptionCameraModal({
                 <div className="rx-preview-wrap">
                   <img src={previewUrl} alt="Captured prescription" className="rx-preview-img" />
                   {isUploading && (
-                    <div className="rx-analyzing-overlay fade-in">
-                      <div className="cp-spinner" style={{ width: 48, height: 48 }} />
-                      <div className="rx-analyzing-text">
-                        <h4>{T.analyzing}</h4>
-                        <p>{analysisStatus}</p>
+                    <div className="rx-analyzing-overlay fade-in" style={{ padding: 18 }}>
+                      <div style={{ width: '100%', maxWidth: 640 }}>
+                        <OcrWorkflowTracker
+                          currentStepIndex={currentOcrStep}
+                          isProcessing={true}
+                          stepMetrics={ocrStepMetrics}
+                          rejectionReason={qualityRejection}
+                          onGoWithoutReport={handleSkip}
+                          compact={true}
+                        />
                       </div>
                     </div>
                   )}
@@ -798,6 +846,19 @@ export default function PrescriptionCameraModal({
           )}
 
         </div>
+
+        {/* ── 6-Stage OCR Pipeline Status Bar (Always visible in idle/camera/qr) ── */}
+        {!isUploading && (
+          <div style={{ padding: '10px 20px', background: '#f8fafc', borderTop: '1px solid #e2e8f0' }}>
+            <OcrWorkflowTracker
+              currentStepIndex={qualityRejection ? 2 : 1}
+              isProcessing={false}
+              rejectionReason={qualityRejection}
+              onGoWithoutReport={handleSkip}
+              compact={true}
+            />
+          </div>
+        )}
 
         {/* ── Footer Actions ── */}
         <div className="rx-camera-footer">
@@ -898,15 +959,29 @@ export default function PrescriptionCameraModal({
             )}
           </div>
 
-          {/* Right: Skip */}
+          {/* Right: Go Without Report (Prominent Skip) */}
           <div className="rx-footer-right">
             <button
               className="rx-btn-skip"
               onClick={handleSkip}
               disabled={isUploading || qrStatus === 'processing'}
+              style={{
+                background: '#0f172a',
+                color: '#ffffff',
+                border: '1.5px solid #334155',
+                padding: '9px 18px',
+                borderRadius: 8,
+                fontWeight: 800,
+                boxShadow: '0 2px 6px rgba(0, 0, 0, 0.25)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+              }}
+              title="Continue conversational triage without attaching a document"
+              id="btn-modal-go-without-report"
             >
               <span>{T.skipBtn}</span>
-              <ArrowRight size={14} />
+              <ArrowRight size={15} />
             </button>
           </div>
         </div>

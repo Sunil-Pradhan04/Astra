@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from app.core.database import init_db
 from app.core.config import settings
-from app.routers import auth, care_hub, doctors, health_workers, endpoint_devices, communicate, settings as settings_router, patients, kiosk, qr_upload, urgency, system_test
+from app.routers import auth, care_hub, doctors, health_workers, endpoint_devices, communicate, settings as settings_router, patients, kiosk, qr_upload, translation, urgency, system_test
 
 
 import asyncio
@@ -87,6 +87,7 @@ app.include_router(settings_router.router,   prefix="/api")
 app.include_router(patients.router,          prefix="/api")
 app.include_router(kiosk.router,             prefix="/api")
 app.include_router(qr_upload.router,         prefix="/api")  # QR-based photo import
+app.include_router(translation.router,       prefix="/api")  # 11-Language Medical Translation Machine
 app.include_router(urgency.router,           prefix="/api")
 app.include_router(urgency.router)  # Direct /triage/urgency support
 app.include_router(system_test.router,       prefix="/api")

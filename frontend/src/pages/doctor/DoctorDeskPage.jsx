@@ -32,6 +32,7 @@ import {
   ArrowRight,
   ShieldCheck,
   Compass,
+  Languages,
 } from 'lucide-react'
 import {
   getDoctorDeskQueue,
@@ -46,6 +47,7 @@ import {
 } from '../../api/doctorApi'
 import PrintedReferralForm from '../../components/referral/PrintedReferralForm'
 import FacilitiesMapRadar from '../../components/referral/FacilitiesMapRadar'
+import MedicalTranslationMachine from '../../components/common/MedicalTranslationMachine'
 import './DoctorDeskPage.css'
 
 const extractErrorMessage = (err, fallback) => {
@@ -198,6 +200,7 @@ export default function DoctorDeskPage() {
   const [submitSuccess, setSubmitSuccess] = useState(null)
   const [previewModal, setPreviewModal] = useState(false)
   const [viewingDocModal, setViewingDocModal] = useState(null)
+  const [isTranslatorOpen, setIsTranslatorOpen] = useState(false)
 
   // ── Clinical Referral State (Inside Hospital & Hospital-to-Another) ──
   const [isReferralModalOpen, setIsReferralModalOpen] = useState(false)
@@ -450,6 +453,12 @@ export default function DoctorDeskPage() {
     setMedicines(medicines.filter((_, i) => i !== index))
   }
 
+  // Handle translation insertion into clinical notes
+  const handleInsertTranslatedText = (translatedText) => {
+    if (!translatedText) return
+    setClinicalNotes((prev) => (prev ? `${prev}\n• [Patient Dialogue]: ${translatedText}` : `• [Patient Dialogue]: ${translatedText}`))
+  }
+
   const applyPreset = (preset) => {
     if (medicines.length === 1 && !medicines[0].name.trim()) {
       setMedicines([{ ...preset }])
@@ -535,6 +544,24 @@ export default function DoctorDeskPage() {
             <span className="doc-online-dot" />
             <span>Consultation Live</span>
           </div>
+
+          <button
+            type="button"
+            onClick={() => setIsTranslatorOpen(true)}
+            className="btn-doc-logout"
+            style={{
+              background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+              color: '#ffffff',
+              borderColor: '#0284c7',
+              fontWeight: 700,
+            }}
+            title="Open 11-Language Medical Translation Machine"
+            id="btn-doc-topbar-translator"
+          >
+            <Languages size={13} />
+            <span>11-Lang Translator</span>
+          </button>
+
           <button
             onClick={fetchQueue}
             className="btn-doc-logout"
@@ -846,6 +873,18 @@ export default function DoctorDeskPage() {
                   >
                     <Share2 size={13} />
                     <span>Refer Patient</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsTranslatorOpen(true)}
+                    className="btn-doc-logout"
+                    style={{ background: '#059669', color: '#ffffff', borderColor: '#059669', fontWeight: 700 }}
+                    title="Ask clinical questions to patient in 11 Indian languages"
+                    id="btn-doc-patient-translator"
+                  >
+                    <Languages size={13} />
+                    <span>Ask in 11 Languages</span>
                   </button>
 
                   <button
@@ -2590,6 +2629,15 @@ export default function DoctorDeskPage() {
           </div>
         </div>
       )}
+
+      {/* ── 11-Language Medical Translation Machine Modal ── */}
+      <MedicalTranslationMachine
+        isOpen={isTranslatorOpen}
+        onClose={() => setIsTranslatorOpen(false)}
+        defaultTargetLang="hi-IN"
+        patientName={selectedPatient?.full_name || 'Patient'}
+        onInsertText={handleInsertTranslatedText}
+      />
     </div>
   )
 }
